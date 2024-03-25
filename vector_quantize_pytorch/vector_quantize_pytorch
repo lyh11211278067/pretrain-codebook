@@ -1,0 +1,1300 @@
+import torch
+from torch import nn, einsum
+import torch.nn.functional as F
+import torch.distributed as distributed
+from torch.optim import Optimizer
+from torch.cuda.amp import autocast
+
+from einops import rearrange, repeat, reduce, pack, unpack
+from functools import partial
+from typing import Callable
+
+
+#
+# 检查一个值是否存在（即不为None）。
+def exists(val):
+    return val is not None
+
+
+# 如果val存在（非None），则返回val，否则返回默认值d。
+def default(val, d):
+    return val if exists(val) else d
+
+
+# 在需要一个占位符函数，但不希望它执行任何操作时，可以使用这个函数。无论传入什么参数，都不执行任何操作。
+def noop(*args, **kwargs):
+    pass
+
+
+# 返回传入的值，不做任何修改。
+def identity(t):
+    return t
+
+
+# 计算张量的L2范数，并进行归一化。
+def l2norm(t):
+    return F.normalize(t, p=2, dim=-1)
+
+
+# 计算两个张量集合之间的批处理距离。
+def cdist(x, y):
+    x2 = reduce(x ** 2, 'b n d -> b n', 'sum')
+    y2 = reduce(y ** 2, 'b n d -> b n', 'sum')
+    xy = einsum('b i d, b j d -> b i j', x, y) * -2
+    return (rearrange(x2, 'b i -> b i 1') + rearrange(y2, 'b j -> b 1 j') + xy).clamp(min=0).sqrt()
+
+
+# 计算张量的对数，但在计算前会确保张量的值不小于eps，以避免对数运算中的数值不稳定问题。
+def log(t, eps=1e-20):
+    return torch.log(t.clamp(min=eps))
+
+
+# 原地更新old的值，使用指数移动平均（EMA）方法结合新的值new和衰减率decay。
+def ema_inplace(old, new, decay):
+    is_mps = str(old.device).startswith('mps:')
+
+    if not is_mps:
+        old.lerp_(new, 1 - decay)
+    else:
+        old.mul_(decay).add_(new * (1 - decay))
+
+
+# 将张量按照给定的模式进行打包。
+def pack_one(t, pattern):
+    return pack([t], pattern)
+
+
+# 将打包后的张量解包回原始形状。
+def unpack_one(t, ps, pattern):
+    return unpack(t, ps, pattern)[0]
+
+
+# 使用Kaiming均匀初始化方法创建一个具有指定形状的张量。使用这个函数来初始化层的权重。
+def uniform_init(*shape):
+    t = torch.empty(shape)
+    nn.init.kaiming_uniform_(t)
+    return t
+
+
+# 为张量添加Gumbel噪声。
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+
+# 在深度学习模型中实现带有Gumbel噪声的随机采样，并根据需要选择不同的采样策略（Reinmax和直通估计器），以提高采样的精度和稳定性。
+def gumbel_sample(
+        logits,  # 输入的原始分数或对数概率。
+        temperature=1.,  # 控制采样随机性的温度参数。当temperature接近0时，采样接近贪心选择；当temperature较大时，采样更加随机。
+        stochastic=False,  # 是否进行随机采样。
+        straight_through=False,  # 是否使用直通估计器（Straight-Through Estimator）
+        reinmax=False,  # 是否使用Reinmax算法来提高二阶精度。
+        dim=-1,  # 在哪个维度上进行采样。
+        training=True  # 是否在训练模式下。
+):
+    # 获取数据类型和大小：dtype: 输入logits的数据类型。size: logits在指定维度上的大小。
+    dtype, size = logits.dtype, logits.shape[dim]
+
+    # 计算采样logits：
+    # 如果在训练模式下，并且希望进行随机采样，且温度参数大于0，则在logits上添加Gumbel噪声，并除以温度。
+    if training and stochastic and temperature > 0:
+        sampling_logits = (logits / temperature) + gumbel_noise(logits)
+    # 否则，直接使用原始的logits。
+    else:
+        sampling_logits = logits
+
+    # 选择最大值的索引并创建one-hot编码：
+    ind = sampling_logits.argmax(dim=dim)  # logits在指定维度上的最大值的索引。
+    one_hot = F.one_hot(ind, size).type(dtype)  # 将索引转换为one-hot编码。
+
+    # 检查Reinmax的使用条件：Reinmax只能在直通估计器（straight_through）启用时使用。
+    assert not (
+            reinmax and not straight_through), 'reinmax can only be turned on if using straight through gumbel softmax'
+
+    # 根据条件返回结果：
+    # 如果不使用直通估计器，或者温度小于等于0，或者不在训练模式下，直接返回索引和one-hot编码。
+    if not straight_through or temperature <= 0. or not training:
+        return ind, one_hot
+
+    # use reinmax for better second-order accuracy - https://arxiv.org/abs/2304.08612
+    # algorithm 2
+
+    # 使用Reinmax或直通估计器：
+    # 如果使用Reinmax，通过一系列计算更新one-hot编码，以提高二阶精度。
+    if reinmax:
+        π0 = logits.softmax(dim=dim)
+        π1 = (one_hot + (logits / temperature).softmax(dim=dim)) / 2
+        π1 = ((log(π1) - logits).detach() + logits).softmax(dim=1)
+        π2 = 2 * π1 - 0.5 * π0
+        one_hot = π2 - π2.detach() + one_hot
+    # 如果不使用Reinmax，但使用直通估计器，更新one-hot编码以加入梯度。
+    else:
+        π1 = (logits / temperature).softmax(dim=dim)
+        one_hot = one_hot + π1 - π1.detach()
+
+    # 返回最大值的索引和更新后的one - hot编码。
+    return ind, one_hot
+
+
+# 实现了Laplace平滑（也称为加1平滑或Lidstone平滑）。Laplace平滑是一种用于处理概率估计中的零概率问题的方法
+# x: 输入的张量（tensor），代表类别频数或概率。
+# n_categories: 总共的类别数。
+# eps: 平滑系数，通常是一个很小的正数，用于避免除以零的情况，并稍微调整原始的概率分布。
+# dim: 进行平滑的维度。
+def laplace_smoothing(x, n_categories, eps=1e-5, dim=-1):
+    denom = x.sum(dim=dim, keepdim=True)
+    return (x + eps) / (denom + n_categories * eps)
+
+
+# 从samples张量中随机抽取num个向量。如果samples中的向量足够多，它会确保每个被抽取的向量都是唯一的；如果不够多，则可能会重复抽取某些向量。
+def sample_vectors(samples, num):
+    num_samples, device = samples.shape[0], samples.device
+    if num_samples >= num:
+        indices = torch.randperm(num_samples, device=device)[:num]
+    else:
+        indices = torch.randint(0, num_samples, (num,), device=device)
+
+    return samples[indices]
+
+
+# 这个函数接受一个批量样本samples（可能是一个张量，其中包含了多个小样本）和一个整数num，并返回从每个小样本中随机抽取的num个向量的集合。
+# 它首先使用unbind方法沿着第一个维度（dim=0）将samples分解成多个小样本，然后对每个小样本调用sample_vectors函数来抽取向量，最后使用torch.stack将结果重新组合成一个张量。
+def batched_sample_vectors(samples, num):
+    return torch.stack([sample_vectors(sample, num) for sample in samples.unbind(dim=0)], dim=0)
+
+
+# 用于修改张量的形状（shape）。它接受一个形状列表shape、一个大小size和一个维度索引dim。它返回一个新的形状列表，其中指定维度dim的大小被替换为size，其他维度的大小保持不变。
+def pad_shape(shape, size, dim=0):
+    return [size if i == dim else s for i, s in enumerate(shape)]
+
+
+# 实现了一个带权重的多项分布抽样:
+# 将probs（概率列表）移到CPU上，因为接下来的计算可能不需要GPU加速。
+# 初始化total_count（总的抽样次数）为一个与probs形状相同的张量，所有元素都是total_count。
+# 初始化remainder为一个全1的张量，与probs形状相同。
+# 初始化一个空的张量sample，形状与probs相同，数据类型为长整型（用于存储抽样结果）。
+# 循环遍历每个概率p，计算当前剩余的总数total_count与p/remainder的二项分布抽样结果s，然后将s加到sample的对应位置，并更新total_count和remainder。
+# 最后，将sample张量移回原来的设备（可能是GPU）。
+def sample_multinomial(total_count, probs):
+    device = probs.device
+    probs = probs.cpu()
+
+    total_count = probs.new_full((), total_count)
+    remainder = probs.new_ones(())
+    sample = torch.empty_like(probs, dtype=torch.long)
+
+    for i, p in enumerate(probs):
+        s = torch.binomial(total_count, p / remainder)
+        sample[i] = s
+        total_count -= s
+        remainder -= p
+
+    return sample.to(device)
+
+
+# 收集所有分布式节点上张量x在指定维度dim上的大小，并返回一个堆叠的张量，其中包含每个节点上该维度的大小。
+def all_gather_sizes(x, dim):
+    size = torch.tensor(x.shape[dim], dtype=torch.long, device=x.device)
+    all_sizes = [torch.empty_like(size) for _ in range(distributed.get_world_size())]
+    distributed.all_gather(all_sizes, size)
+    return torch.stack(all_sizes)
+
+
+# 收集分布式环境中不同节点上可能大小不同的张量。每个节点都会根据sizes列表中的大小来创建一个新的张量（或直接使用本地张量），然后所有节点通过广播操作从相应的源节点接收数据。
+def all_gather_variably_sized(x, sizes, dim=0):
+    rank = distributed.get_rank()
+    all_x = []
+
+    for i, size in enumerate(sizes):
+        t = x if i == rank else x.new_empty(pad_shape(x.shape, size, dim))
+        distributed.broadcast(t, src=i, async_op=True)
+        all_x.append(t)
+
+    distributed.barrier()
+    return all_x
+
+
+# 在分布式环境中从local_samples中抽取num个向量:
+# 重新排列local_samples的形状。
+# 获取当前节点的排名。
+# 收集所有节点上local_samples的第一个维度的大小。
+# 在排名为0的节点上，使用sample_multinomial函数根据每个节点上样本的数量来确定每个节点应该抽取的样本数。
+# 将计算出的每个节点应抽取的样本数广播到所有节点。
+# 使用sample_vectors函数从本地local_samples中抽取相应数量的样本。
+# 收集所有节点抽取的样本。
+# 将所有收集的样本拼接起来。
+# 重新排列拼接后的样本的形状。
+def sample_vectors_distributed(local_samples, num):
+    local_samples = rearrange(local_samples, '1 ... -> ...')
+
+    rank = distributed.get_rank()
+    all_num_samples = all_gather_sizes(local_samples, dim=0)
+
+    if rank == 0:
+        samples_per_rank = sample_multinomial(num, all_num_samples / all_num_samples.sum())
+    else:
+        samples_per_rank = torch.empty_like(all_num_samples)
+
+    distributed.broadcast(samples_per_rank, src=0)
+    samples_per_rank = samples_per_rank.tolist()
+
+    local_samples = sample_vectors(local_samples, samples_per_rank[rank])
+    all_samples = all_gather_variably_sized(local_samples, samples_per_rank, dim=0)
+    out = torch.cat(all_samples, dim=0)
+
+    return rearrange(out, '... -> 1 ...')
+
+
+# 一个用于统计整数数组中每个值在批次中出现次数的函数。
+# 它接受一个二维张量x，其中每行代表一个批次，每列是一个整数。函数返回一个二维张量，其中每行代表一个批次，每列表示对应整数在批次中的出现次数。
+# 通过scatter_add_操作，它实现了对整数的计数功能。
+def batched_bincount(x, *, minlength):
+    batch, dtype, device = x.shape[0], x.dtype, x.device
+    target = torch.zeros(batch, minlength, dtype=dtype, device=device)
+    values = torch.ones_like(x)
+    target.scatter_add_(-1, x, values)
+    return target
+
+
+# 该函数实现了K-means聚类算法，用于将数据点划分为K个聚类。它接受样本数据、聚类数量、迭代次数等参数，并返回最终的聚类中心和每个聚类中的样本数量。
+# 算法的主要步骤包括初始化聚类中心、迭代计算样本到聚类中心的距离、分配样本到最近的聚类中心、更新聚类中心的位置，并可以处理使用余弦相似度作为距离度量的情况。
+# 函数通过迭代更新聚类中心的位置，直到满足迭代次数或收敛条件。最终返回的是聚类中心和每个聚类中的样本数量。
+def kmeans(
+        samples,
+        num_clusters,
+        num_iters=10,
+        use_cosine_sim=False,
+        sample_fn=batched_sample_vectors,
+        all_reduce_fn=noop
+):
+    num_codebooks, dim, dtype, device = samples.shape[0], samples.shape[-1], samples.dtype, samples.device
+
+    means = sample_fn(samples, num_clusters)
+
+    for _ in range(num_iters):
+        if use_cosine_sim:
+            dists = samples @ rearrange(means, 'h n d -> h d n')
+        else:
+            dists = -cdist(samples, means)
+
+        buckets = torch.argmax(dists, dim=-1)
+        bins = batched_bincount(buckets, minlength=num_clusters)
+        all_reduce_fn(bins)
+
+        zero_mask = bins == 0
+        bins_min_clamped = bins.masked_fill(zero_mask, 1)
+
+        new_means = buckets.new_zeros(num_codebooks, num_clusters, dim, dtype=dtype)
+
+        new_means.scatter_add_(1, repeat(buckets, 'h n -> h n d', d=dim), samples)
+        new_means = new_means / rearrange(bins_min_clamped, '... -> ... 1')
+        all_reduce_fn(new_means)
+
+        if use_cosine_sim:
+            new_means = l2norm(new_means)
+
+        means = torch.where(
+            rearrange(zero_mask, '... -> ... 1'),
+            means,
+            new_means
+        )
+
+    return means, bins
+
+
+# 该函数根据提供的索引从嵌入张量中提取嵌入向量。它接受一个三维索引张量和一个三维嵌入张量作为输入，并返回一个三维张量，其中包含根据索引从嵌入张量中提取的嵌入向量。
+def batched_embedding(indices, embeds):
+    batch, dim = indices.shape[1], embeds.shape[-1]
+    indices = repeat(indices, 'h b n -> h b n d', d=dim)
+    embeds = repeat(embeds, 'h c d -> h b c d', b=batch)
+    return embeds.gather(2, indices)
+
+
+# regularization losses正则化损失
+# 该函数计算输入张量的正交损失，目的是使张量中的向量尽可能正交。它首先对输入张量进行L2归一化，然后计算归一化向量之间的余弦相似度。
+# 通过计算余弦相似度的平方和并进行适当的归一化和调整，得到最终的正交损失值。这个损失函数可以帮助优化算法使得向量之间更加独立。
+def orthogonal_loss_fn(t):
+    # eq (2) from https://arxiv.org/abs/2112.00384
+    h, n = t.shape[:2]
+    normed_codes = l2norm(t)
+    cosine_sim = einsum('h i d, h j d -> h i j', normed_codes, normed_codes)
+    return (cosine_sim ** 2).sum() / (h * n ** 2) - (1 / n)
+
+
+# VectorQuantize是将每一个vector与内部的codebook做计算，然后得出一个quantized vector
+# VectorQuantize内部一共有两个codebook的实现，EuclideanCodebook和CosineSimCodebook。
+# VectorQuantize有一个入参，use_cosine_sim = False, 指定使用哪一个实现。默认的False代表使用EuclideanCodebook。
+
+class EuclideanCodebook(nn.Module):
+    def __init__(
+            self,
+            dim,  # 码本中每个嵌入的维度。
+            codebook_size,  # 码本的大小，即其中嵌入的数量。
+            num_codebooks=1,  # 码本的数量。默认是1，但可能有多个码本用于不同的子空间或层。
+            kmeans_init=False,  # 是否使用K-means算法来初始化码本。
+            kmeans_iters=10,  # 如果使用K-means初始化，这是K-means算法的迭代次数。
+            sync_kmeans=True,  # 是否在多GPU或多机环境中同步K-means算法。
+            decay=0.8,  # EMA（指数移动平均）的衰减率，通常用于更新嵌入。
+            eps=1e-5,  # 一个小的正数，可能用于避免除以零或稳定数值计算。
+            threshold_ema_dead_code=2,  # EMA更新时，如果某个嵌入的EMA计数低于此阈值，则可能被视为“死”嵌入。
+            reset_cluster_size=None,  # 用于重置集群大小的参数，但具体行为需要查看类中的其他代码。
+            use_ddp=False,  # 是否使用分布式数据并行
+            learnable_codebook=False,  # 码本是否可学习。
+            gumbel_sample=gumbel_sample,  # 是否使用Gumbel采样。
+            sample_codebook_temp=1.,  # 采样码本时的温度参数。
+            ema_update=True,  # 是否使用EMA更新嵌入。
+            affine_param=False,  # 是否使用仿射参数
+            sync_affine_param=False,  # 是否在多GPU或多机环境中同步仿射参数。
+            affine_param_batch_decay=0.99,  # 仿射参数的EMA衰减率（批处理级别）。
+            affine_param_codebook_decay=0.9  # 仿射参数的EMA衰减率（码本级别）。
+    ):
+        super().__init__()
+        self.transform_input = identity
+
+        self.decay = decay
+        self.ema_update = ema_update
+
+        # 初始化函数，根据入参kmeans_init来决定
+        init_fn = uniform_init if not kmeans_init else torch.zeros
+
+        # 内部的codebook实际上就是这里embed的张量，shape为(num_codebooks, codebook_size, dim)
+        embed = init_fn(num_codebooks, codebook_size, dim)
+
+        # 必填入参，表示codebook的大小
+        self.codebook_size = codebook_size
+        self.num_codebooks = num_codebooks
+
+        self.kmeans_iters = kmeans_iters
+        self.eps = eps
+        self.threshold_ema_dead_code = threshold_ema_dead_code
+        self.reset_cluster_size = default(reset_cluster_size, threshold_ema_dead_code)
+
+        # 检查并设置Gumbel采样函数:
+        assert callable(gumbel_sample)
+        self.gumbel_sample = gumbel_sample
+        self.sample_codebook_temp = sample_codebook_temp
+
+        # 确保在分布式环境下（use_ddp为True）使用多个码本（num_codebooks > 1）时，不会使用K-means初始化（kmeans_init为True）。
+        assert not (
+                use_ddp and num_codebooks > 1 and kmeans_init), 'kmeans init is not compatible with multiple codebooks in distributed environment for now'
+
+        # 根据是否使用分布式数据并行（use_ddp）和是否需要同步K-means（sync_kmeans），选择不同的采样函数和归约函数。
+        self.sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
+        self.kmeans_all_reduce_fn = distributed.all_reduce if use_ddp and sync_kmeans else noop
+        self.all_reduce_fn = distributed.all_reduce if use_ddp else noop
+
+        # initted会影响init_embed_函数
+        self.register_buffer('initted', torch.Tensor([not kmeans_init]))
+        self.register_buffer('cluster_size', torch.zeros(num_codebooks, codebook_size))
+
+        # 用于学习更新emb
+        self.register_buffer('embed_avg', embed.clone())
+
+        self.learnable_codebook = learnable_codebook
+        if learnable_codebook:
+            # 正如参数说明，如果是可学习的codebook,则为一个Parameter
+            self.embed = nn.Parameter(embed)
+        else:
+            # 默认值，不可学习的codebook,则为一个buffer,但是它的值还是会更新
+            self.register_buffer('embed', embed)
+
+        # affine related params 仿射相关参数
+
+        self.affine_param = affine_param
+        self.sync_affine_param = sync_affine_param
+
+        if not affine_param:
+            return
+
+        self.affine_param_batch_decay = affine_param_batch_decay
+        self.affine_param_codebook_decay = affine_param_codebook_decay
+
+        # 注册批次均值和方差缓冲区
+        self.register_buffer('batch_mean', None)
+        self.register_buffer('batch_variance', None)
+
+        # 注册码本均值和方差相关缓冲区:
+        # codebook_mean_needs_init和codebook_variance_needs_init用于标记是否需要初始化均值和方差。
+        # codebook_mean和codebook_variance则用于存储实际的均值和方差值，它们的形状为(num_codebooks, 1, dim)，其中num_codebooks是码本的数量，dim是嵌入向量的维度。
+        self.register_buffer('codebook_mean_needs_init', torch.Tensor([True]))
+        self.register_buffer('codebook_mean', torch.empty(num_codebooks, 1, dim))
+        self.register_buffer('codebook_variance_needs_init', torch.Tensor([True]))
+        self.register_buffer('codebook_variance', torch.empty(num_codebooks, 1, dim))
+
+    # 初始化嵌入向量。
+    @torch.jit.ignore
+    def init_embed_(self, data, mask=None):
+        if self.initted:  # true则嵌入向量已经被初始化，函数直接返回。
+            return
+
+        # 如果提供了mask，函数会对输入数据data进行筛选，只保留mask为True的部分，并重新排列数据形状。
+        if exists(mask):
+            c = data.shape[0]
+            data = rearrange(data[mask], '(c n) d -> c n d', c=c)
+
+        # 使用kmeans函数对筛选后的数据进行聚类，得到聚类中心（即嵌入向量）embed和每个聚类的大小（即样本数量）cluster_size。
+        embed, cluster_size = kmeans(
+            data,
+            self.codebook_size,
+            self.kmeans_iters,
+            sample_fn=self.sample_fn,
+            all_reduce_fn=self.kmeans_all_reduce_fn
+        )
+
+        # 计算嵌入向量的加权和
+        embed_sum = embed * rearrange(cluster_size, '... -> ... 1')
+
+        # 更新缓冲区：
+        self.embed.data.copy_(embed)
+        self.embed_avg.data.copy_(embed_sum)
+        self.cluster_size.data.copy_(cluster_size)
+        self.initted.data.copy_(torch.Tensor([True]))
+
+    # 使用衰减率更新缓冲区中的值。
+    @torch.jit.ignore
+    def update_with_decay(self, buffer_name, new_value, decay):
+        old_value = getattr(self, buffer_name)
+
+        # 如果needs_init为True，将对应的初始化需求标志更新为False。
+        needs_init = getattr(self, buffer_name + "_needs_init", False)
+
+        # 如果旧值不存在或需要初始化，则使用new_value初始化缓冲区。
+        if needs_init:
+            self.register_buffer(buffer_name + "_needs_init", torch.Tensor([False]))
+
+        # 如果旧值存在且不需要初始化，则使用衰减率decay来更新缓冲区的值。新的值value是旧值乘以衰减率加上新值乘以（1 - 衰减率）。
+        if not exists(old_value) or needs_init:
+            self.register_buffer(buffer_name, new_value.detach())
+
+            return
+
+        value = old_value * decay + new_value.detach() * (1 - decay)
+        self.register_buffer(buffer_name, value)
+
+    # 更新与仿射变换相关的参数
+    @torch.jit.ignore
+    def update_affine(self, data, embed, mask=None):
+        assert self.affine_param
+
+        var_fn = partial(torch.var, unbiased=False)
+
+        # calculate codebook mean and variance
+        # 计算码本均值和方差
+        embed = rearrange(embed, 'h ... d -> h (...) d')
+
+        if self.training:
+            self.update_with_decay('codebook_mean', reduce(embed, 'h n d -> h 1 d', 'mean'),
+                                   self.affine_param_codebook_decay)
+            self.update_with_decay('codebook_variance', reduce(embed, 'h n d -> h 1 d', var_fn),
+                                   self.affine_param_codebook_decay)
+
+        # prepare batch data, which depends on whether it has masking
+        # 准备批处理数据，具体取决于是否有屏蔽
+        data = rearrange(data, 'h ... d -> h (...) d')
+
+        if exists(mask):
+            c = data.shape[0]
+            data = rearrange(data[mask], '(c n) d -> c n d', c=c)
+
+        # calculate batch mean and variance
+
+        if not self.sync_affine_param:
+            self.update_with_decay('batch_mean', reduce(data, 'h n d -> h 1 d', 'mean'), self.affine_param_batch_decay)
+            self.update_with_decay('batch_variance', reduce(data, 'h n d -> h 1 d', var_fn),
+                                   self.affine_param_batch_decay)
+            return
+
+        num_vectors, device, dtype = data.shape[-2], data.device, data.dtype
+
+        # number of vectors, for denominator
+        # 分母是向量的个数
+
+        num_vectors = torch.tensor([num_vectors], device=device, dtype=dtype)
+        distributed.all_reduce(num_vectors)
+
+        # calculate distributed mean
+        # 计算分布均值
+
+        batch_sum = reduce(data, 'h n d -> h 1 d', 'sum')
+        distributed.all_reduce(batch_sum)
+        batch_mean = batch_sum / num_vectors
+
+        self.update_with_decay('batch_mean', batch_mean, self.affine_param_batch_decay)
+
+        # calculate distributed variance
+        # 计算分布方差
+
+        variance_numer = reduce((data - batch_mean) ** 2, 'h n d -> h 1 d', 'sum')
+        distributed.all_reduce(variance_numer)
+        batch_variance = variance_numer / num_vectors
+
+        self.update_with_decay('batch_variance', batch_variance, self.affine_param_batch_decay)
+
+    # 替换那些被选中的样本的嵌入向量
+    def replace(self, batch_samples, batch_mask):
+        # 方法通过unbind方法遍历batch_samples和batch_mask中的每个样本。batch_samples可能包含一批待处理的样本，而batch_mask是一个布尔掩码，用于指示哪些样本需要被替换。
+        for ind, (samples, mask) in enumerate(zip(batch_samples.unbind(dim=0), batch_mask.unbind(dim=0))):
+            if not torch.any(mask):
+                continue
+            # 对于需要被替换的样本，使用self.sample_fn从码本中采样新的嵌入向量。这里假定self.sample_fn是一个能够根据输入数据和掩码返回新嵌入向量的函数。
+            sampled = self.sample_fn(rearrange(samples, '... -> 1 ...'), mask.sum().item())
+            sampled = rearrange(sampled, '1 ... -> ...')
+
+            # 将新采样的嵌入向量赋值给对应位置的self.embed数据。
+            self.embed.data[ind][mask] = sampled
+
+            # 将self.cluster_size（每个码本项的大小或使用次数）重置为self.reset_cluster_size，并相应地更新self.embed_avg（嵌入向量的平均值）。
+            self.cluster_size.data[ind][mask] = self.reset_cluster_size
+            self.embed_avg.data[ind][mask] = sampled * self.reset_cluster_size
+
+    # 替换那些使用次数低于某个阈值的码本项（即嵌入向量）
+    def expire_codes_(self, batch_samples):
+        # self.threshold_ema_dead_code:过期码本的阈值
+        if self.threshold_ema_dead_code == 0:
+            return
+
+        # 通过比较self.cluster_size和self.threshold_ema_dead_code来找出使用次数低于阈值的码本项。
+        expired_codes = self.cluster_size < self.threshold_ema_dead_code
+
+        if not torch.any(expired_codes):
+            return
+
+        # 如果有码本项过期，则调用replace方法替换这些过期的码本项。batch_mask=expired_codes作为掩码，表示哪些码本项需要被替换。
+        batch_samples = rearrange(batch_samples, 'h ... d -> h (...) d')
+        self.replace(batch_samples, batch_mask=expired_codes)
+
+    # 前向传播函数.负责处理输入数据x，通过一系列操作将其映射到码本（codebook）中的嵌入向量（embedding），并可能根据条件进行采样或更新。
+    @autocast(enabled=False)
+    def forward(
+            self,
+            x,
+            sample_codebook_temp=None,
+            mask=None,
+            freeze_codebook=False  # 指示是否冻结码本（即不更新码本）
+    ):
+        # 输入的维度如果小于4，则增加一个维度
+        needs_codebook_dim = x.ndim < 4
+        sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
+
+        x = x.float()  # 将x转换为浮点数类型。
+
+        # 使用rearrange函数调整x的形状，使其第一个维度为1（如果需要的话）。
+        if needs_codebook_dim:
+            x = rearrange(x, '... -> 1 ...')
+
+        # flatten是保留首尾，中间的维度都合并
+        # 这样做的目的应该是想保留三个维度，第一维度始终是1，最后一个维度即code book里的dim维度
+        # 其他维度都压缩在中间维度里
+        dtype = x.dtype
+        flatten, ps = pack_one(x, 'h * d')
+
+        # 如果提供了mask，则使用repeat函数将其扩展到与flatten相同的形状。
+        if exists(mask):
+            mask = repeat(mask, 'b n -> c (b h n)', c=flatten.shape[0],
+                          h=flatten.shape[-2] // (mask.shape[0] * mask.shape[1]))
+
+        # 调用self.init_embed_函数来初始化或更新嵌入向量。这个函数的具体行为取决于其实现，但通常涉及根据输入数据flatten和掩码mask来初始化或更新码本。
+        self.init_embed_(flatten, mask=mask)
+
+        # 如果self.affine_param为True，则调用self.update_affine函数来更新仿射变换的参数。这通常涉及计算输入数据的统计量，并更新码本的统计量。
+        if self.affine_param:
+            self.update_affine(flatten, self.embed, mask=mask)
+
+        # 根据self.learnable_codebook的值，选择是否使用可学习的码本。如果为False，则使用不可学习的码本（即不更新其梯度）。
+        # 如果self.affine_param为True，则根据仿射变换的参数调整嵌入向量的值。这通常涉及对嵌入向量进行缩放和平移。
+        embed = self.embed if self.learnable_codebook else self.embed.detach()
+
+        if self.affine_param:
+            codebook_std = self.codebook_variance.clamp(min=1e-5).sqrt()
+            batch_std = self.batch_variance.clamp(min=1e-5).sqrt()
+            embed = (embed - self.codebook_mean) * (batch_std / codebook_std) + self.batch_mean
+
+        # 使用cdist函数计算flatten与嵌入向量之间的距离。
+        dist = -cdist(flatten, embed)
+
+        # 使用gumbel_sample函数根据距离和温度参数进行采样，得到嵌入索引embed_ind和嵌入向量的one-hot表示embed_onehot。
+        embed_ind, embed_onehot = self.gumbel_sample(dist, dim=-1, temperature=sample_codebook_temp,
+                                                     training=self.training)
+
+        # 使用unpack_one函数恢复embed_ind的形状，使其与原始输入x的形状兼容。
+        embed_ind = unpack_one(embed_ind, ps, 'h *')
+
+        # 如果模型处于训练模式（self.training为True），则使用unpack_one函数恢复嵌入向量的one-hot表示的原始形状。
+        # 使用einsum函数计算quantize，即根据嵌入向量的one-hot表示和嵌入向量本身得到量化后的表示。这实际上是执行一个加权和，其中权重是one-hot向量。
+        if self.training:
+            unpacked_onehot = unpack_one(embed_onehot, ps, 'h * c')
+            quantize = einsum('h b n c, h c d -> h b n d', unpacked_onehot, embed)
+        # 如果模型不处于训练模式，则使用batched_embedding函数根据嵌入索引embed_ind直接查找嵌入向量。
+        else:
+            quantize = batched_embedding(embed_ind, embed)
+
+        # 如果模型处于训练模式，并且启用了指数移动平均（EMA）更新，并且没有冻结码本，则执行以下操作：
+        #
+        # 如果启用了仿射参数（self.affine_param为True），则对flatten进行仿射变换的调整。
+        # 如果提供了掩码mask，则将embed_onehot中对应于掩码为False的位置设置为0。
+        # 计算每个嵌入向量的簇大小（即每个嵌入向量被选中的次数）。
+        # 使用all_reduce_fn函数对簇大小进行规约操作（可能是为了跨多个GPU或节点同步数据）。
+        # 使用EMA更新self.cluster_size。
+        # 计算嵌入向量的总和embed_sum，并同样进行规约操作。
+        # 使用EMA更新self.embed_avg。
+        # 对簇大小应用拉普拉斯平滑，并根据簇大小的总和进行缩放。
+        # 根据平滑后的簇大小对嵌入向量的平均值进行归一化，并更新self.embed。
+        # 调用self.expire_codes_函数来处理过期的嵌入向量（可能是删除很少使用的嵌入向量）。
+        if self.training and self.ema_update and not freeze_codebook:
+
+            if self.affine_param:
+                flatten = (flatten - self.batch_mean) * (codebook_std / batch_std) + self.codebook_mean
+
+            if exists(mask):
+                embed_onehot[~mask] = 0.
+
+            cluster_size = embed_onehot.sum(dim=1)
+
+            self.all_reduce_fn(cluster_size)
+            ema_inplace(self.cluster_size.data, cluster_size, self.decay)
+
+            embed_sum = einsum('h n d, h n c -> h c d', flatten, embed_onehot)
+            embed_sum = embed_sum.contiguous()
+            self.all_reduce_fn(embed_sum)
+
+            ema_inplace(self.embed_avg.data, embed_sum, self.decay)
+
+            cluster_size = laplace_smoothing(self.cluster_size, self.codebook_size, self.eps) * self.cluster_size.sum(
+                dim=-1, keepdim=True)
+
+            embed_normalized = self.embed_avg / rearrange(cluster_size, '... -> ... 1')
+            self.embed.data.copy_(embed_normalized)
+            self.expire_codes_(x)
+
+        # 如果之前增加了维度以满足输入要求（即needs_codebook_dim为True），则使用rearrange函数恢复quantize和embed_ind的原始形状。
+        if needs_codebook_dim:
+            quantize, embed_ind = map(lambda t: rearrange(t, '1 ... -> ...'), (quantize, embed_ind))
+
+        # 使用unpack_one函数恢复距离矩阵dist的原始形状。
+        dist = unpack_one(dist, ps, 'h * d')
+
+        # 返回quantize（量化后的表示）、embed_ind（嵌入索引）和dist（距离矩阵）。
+        return quantize, embed_ind, dist
+
+
+class CosineSimCodebook(nn.Module):
+    def __init__(
+            self,
+            dim,
+            codebook_size,
+            num_codebooks=1,
+            kmeans_init=False,
+            kmeans_iters=10,
+            sync_kmeans=True,
+            decay=0.8,
+            eps=1e-5,
+            threshold_ema_dead_code=2,
+            reset_cluster_size=None,
+            use_ddp=False,
+            learnable_codebook=False,
+            gumbel_sample=gumbel_sample,
+            sample_codebook_temp=1.,
+            ema_update=True
+    ):
+        super().__init__()
+        self.transform_input = l2norm
+
+        self.ema_update = ema_update
+        self.decay = decay
+
+        # 默认分支
+        # 加上L2范式的初始化
+        if not kmeans_init:
+            embed = l2norm(uniform_init(num_codebooks, codebook_size, dim))
+        else:
+            embed = torch.zeros(num_codebooks, codebook_size, dim)
+
+        self.codebook_size = codebook_size
+        self.num_codebooks = num_codebooks
+
+        self.kmeans_iters = kmeans_iters
+        self.eps = eps
+        self.threshold_ema_dead_code = threshold_ema_dead_code
+        self.reset_cluster_size = default(reset_cluster_size, threshold_ema_dead_code)
+
+        assert callable(gumbel_sample)
+        self.gumbel_sample = gumbel_sample
+        self.sample_codebook_temp = sample_codebook_temp
+
+        self.sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
+        self.kmeans_all_reduce_fn = distributed.all_reduce if use_ddp and sync_kmeans else noop
+        self.all_reduce_fn = distributed.all_reduce if use_ddp else noop
+
+        self.register_buffer('initted', torch.Tensor([not kmeans_init]))
+        self.register_buffer('cluster_size', torch.zeros(num_codebooks, codebook_size))
+        self.register_buffer('embed_avg', embed.clone())
+
+        self.learnable_codebook = learnable_codebook
+        if learnable_codebook:
+            # 正如参数说明，如果是可学习的codebook,则为一个Parameter
+            self.embed = nn.Parameter(embed)
+        else:
+            # 默认值，不可学习的codebook,则为一个buffer,但是它的值还是会更新
+            self.register_buffer('embed', embed)
+
+    @torch.jit.ignore
+    def init_embed_(self, data, mask=None):
+        if self.initted:
+            return
+
+        if exists(mask):
+            c = data.shape[0]
+            data = rearrange(data[mask], '(c n) d -> c n d', c=c)
+
+        embed, cluster_size = kmeans(
+            data,
+            self.codebook_size,
+            self.kmeans_iters,
+            use_cosine_sim=True,
+            sample_fn=self.sample_fn,
+            all_reduce_fn=self.kmeans_all_reduce_fn
+        )
+
+        embed_sum = embed * rearrange(cluster_size, '... -> ... 1')
+
+        self.embed.data.copy_(embed)
+        self.embed_avg.data.copy_(embed_sum)
+        self.cluster_size.data.copy_(cluster_size)
+        self.initted.data.copy_(torch.Tensor([True]))
+
+    def replace(self, batch_samples, batch_mask):
+        batch_samples = l2norm(batch_samples)
+
+        for ind, (samples, mask) in enumerate(zip(batch_samples.unbind(dim=0), batch_mask.unbind(dim=0))):
+            if not torch.any(mask):
+                continue
+
+            sampled = self.sample_fn(rearrange(samples, '... -> 1 ...'), mask.sum().item())
+            sampled = rearrange(sampled, '1 ... -> ...')
+
+            self.embed.data[ind][mask] = sampled
+            self.embed_avg.data[ind][mask] = sampled * self.reset_cluster_size
+            self.cluster_size.data[ind][mask] = self.reset_cluster_size
+
+    def expire_codes_(self, batch_samples):
+        if self.threshold_ema_dead_code == 0:
+            return
+
+        expired_codes = self.cluster_size < self.threshold_ema_dead_code
+
+        if not torch.any(expired_codes):
+            return
+
+        batch_samples = rearrange(batch_samples, 'h ... d -> h (...) d')
+        self.replace(batch_samples, batch_mask=expired_codes)
+
+    @autocast(enabled=False)
+    def forward(
+            self,
+            x,
+            sample_codebook_temp=None,
+            mask=None,
+            freeze_codebook=False
+    ):
+        needs_codebook_dim = x.ndim < 4
+        sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
+
+        x = x.float()
+
+        if needs_codebook_dim:
+            x = rearrange(x, '... -> 1 ...')
+
+        dtype = x.dtype
+
+        # 使用pack_one函数将x的某些维度合并，以简化后续操作。这通常是为了将中间维度压缩，同时保留第一个和最后一个维度。
+        flatten, ps = pack_one(x, 'h * d')
+
+        if exists(mask):
+            mask = repeat(mask, 'b n -> c (b h n)', c=flatten.shape[0],
+                          h=flatten.shape[-2] // (mask.shape[0] * mask.shape[1]))
+
+        self.init_embed_(flatten, mask=mask)
+
+        embed = self.embed if self.learnable_codebook else self.embed.detach()
+
+        # 这个运算就是 embed_onehot  乘  flatten，矩阵乘法
+        dist = einsum('h n d, h c d -> h n c', flatten, embed)
+
+        embed_ind, embed_onehot = self.gumbel_sample(dist, dim=-1, temperature=sample_codebook_temp,
+                                                     training=self.training)
+        embed_ind = unpack_one(embed_ind, ps, 'h *')
+
+        if self.training:
+            unpacked_onehot = unpack_one(embed_onehot, ps, 'h * c')
+            quantize = einsum('h b n c, h c d -> h b n d', unpacked_onehot, embed)
+        else:
+            quantize = batched_embedding(embed_ind, embed)
+
+        if self.training and self.ema_update and not freeze_codebook:
+            if exists(mask):
+                embed_onehot[~mask] = 0.
+
+            bins = embed_onehot.sum(dim=1)
+            self.all_reduce_fn(bins)
+
+            ema_inplace(self.cluster_size.data, bins, self.decay)
+
+            embed_sum = einsum('h n d, h n c -> h c d', flatten, embed_onehot)
+            embed_sum = embed_sum.contiguous()
+            self.all_reduce_fn(embed_sum)
+
+            ema_inplace(self.embed_avg.data, embed_sum, self.decay)
+
+            cluster_size = laplace_smoothing(self.cluster_size, self.codebook_size, self.eps) * self.cluster_size.sum(
+                dim=-1, keepdim=True)
+
+            embed_normalized = self.embed_avg / rearrange(cluster_size, '... -> ... 1')
+            embed_normalized = l2norm(embed_normalized)
+
+            self.embed.data.copy_(l2norm(embed_normalized))
+            self.expire_codes_(x)
+
+        if needs_codebook_dim:
+            quantize, embed_ind = map(lambda t: rearrange(t, '1 ... -> ...'), (quantize, embed_ind))
+
+        dist = unpack_one(dist, ps, 'h * d')
+        return quantize, embed_ind, dist
+
+
+class VectorQuantize(nn.Module):
+    def __init__(
+            self,
+            dim,  # 输入向量的维度。
+            codebook_size,  # 码本的大小，即可能的离散表示的数量。
+            codebook_dim=None,  # 码本中每个向量的维度。如果未指定，则默认为dim。
+            heads=1,  # 头的数量。当heads大于1时，输入会被分割成多个部分，每个部分都有自己的码本。这可以用于多头的向量量化。
+            separate_codebook_per_head=False,  # 如果为True，每个头都有自己的码本。
+            decay=0.8,  # 指数移动平均（EMA）的衰减率，用于更新码本。
+            eps=1e-5,  # 一个小的正数，用于防止除以零或确保数值稳定性。
+            freeze_codebook=False,  # 如果为True，则在训练过程中不会更新码本。
+            kmeans_init=False,  # 如果为True，使用K-means算法初始化码本。
+            kmeans_iters=10,  # K-means初始化的迭代次数。
+            sync_kmeans=True,  # 是否跨多个设备同步K-means初始化。
+            use_cosine_sim=False,  # 使用哪一种codebook(是否使用余弦相似度作为距离度量而不是欧几里得距离。)
+            threshold_ema_dead_code=0,  # 与码本中“死亡”或很少使用的代码相关的阈值。
+            channel_last=True,  # 如果为True，输入的形状应为[..., dim]，否则应为[dim, ...]。
+            accept_image_fmap=False,  # 是否接受图像特征图作为输入。
+            commitment_weight=1.,  # 承诺损失的权重，该损失鼓励输入向量更接近其最近的码本条目。
+            commitment_use_cross_entropy_loss=False,  # 是否使用交叉熵损失作为承诺损失。
+            orthogonal_reg_weight=0.,  # 正交正则化的权重，鼓励码本中的向量保持正交。
+            orthogonal_reg_active_codes_only=False,  # 如果为True，则仅对激活的代码应用正交正则化。
+            orthogonal_reg_max_codes=None,  # 正交正则化考虑的最大代码数量。
+            stochastic_sample_codes=False,  # 是否随机采样码本中的代码。
+            sample_codebook_temp=1.,  # 采样码本代码时的温度参数。
+            straight_through=False,  # 是否使用直通估计器
+            reinmax=False,  # 是否使用直通估计器
+            sync_codebook=None,  # 同步码本的策略。
+            sync_affine_param=False,  # 是否同步仿射参数。
+            ema_update=True,  # 是否使用EMA更新码本
+            learnable_codebook=False,  # 是否学习码本
+            in_place_codebook_optimizer: Callable[..., Optimizer] = None,  # 如果使用learnable_codebook，则此优化器用于更新码本嵌入。
+            affine_param=False,  # 是否使用仿射参数（即，对每个输入应用缩放和平移）
+            affine_param_batch_decay=0.99,  # 仿射参数的衰减率。
+            affine_param_codebook_decay=0.9,  # 仿射参数的衰减率。
+            sync_update_v=0.  # 控制同步更新规则的乐观与悲观程度的参数。
+            # the v that controls optimistic vs pessimistic update for synchronous update rule (21) https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
+    ):
+        super().__init__()
+        self.dim = dim
+        self.heads = heads
+        self.separate_codebook_per_head = separate_codebook_per_head
+
+        codebook_dim = default(codebook_dim, dim)
+        codebook_input_dim = codebook_dim * heads
+
+        requires_projection = codebook_input_dim != dim
+        self.project_in = nn.Linear(dim, codebook_input_dim) if requires_projection else nn.Identity()
+        self.project_out = nn.Linear(codebook_input_dim, dim) if requires_projection else nn.Identity()
+
+        self.has_projections = requires_projection
+
+        self.eps = eps
+        self.commitment_weight = commitment_weight
+        self.commitment_use_cross_entropy_loss = commitment_use_cross_entropy_loss  # whether to use cross entropy loss to codebook as commitment loss
+
+        self.learnable_codebook = learnable_codebook
+
+        has_codebook_orthogonal_loss = orthogonal_reg_weight > 0
+        self.has_codebook_orthogonal_loss = has_codebook_orthogonal_loss
+        self.orthogonal_reg_weight = orthogonal_reg_weight
+        self.orthogonal_reg_active_codes_only = orthogonal_reg_active_codes_only
+        self.orthogonal_reg_max_codes = orthogonal_reg_max_codes
+
+        # 断言用于确保参数设置是合理的
+        assert not (ema_update and learnable_codebook), 'learnable codebook not compatible with EMA update'
+
+        assert 0 <= sync_update_v <= 1.
+        assert not (sync_update_v > 0. and not learnable_codebook), 'learnable codebook must be turned on'
+
+        self.sync_update_v = sync_update_v
+
+        # codebook根据入参use_cosine_sim二选一，每一种类型上面都有介绍
+        codebook_class = EuclideanCodebook if not use_cosine_sim else CosineSimCodebook
+
+        # 定义Gumbel采样函数:
+        gumbel_sample_fn = partial(
+            gumbel_sample,
+            stochastic=stochastic_sample_codes,
+            reinmax=reinmax,
+            straight_through=straight_through
+        )
+
+        # 检查是否需要同步码本:
+        if not exists(sync_codebook):
+            sync_codebook = distributed.is_initialized() and distributed.get_world_size() > 1
+
+        # 构建码本关键字参数:
+        codebook_kwargs = dict(
+            dim=codebook_dim,
+            num_codebooks=heads if separate_codebook_per_head else 1,
+            codebook_size=codebook_size,
+            kmeans_init=kmeans_init,
+            kmeans_iters=kmeans_iters,
+            sync_kmeans=sync_kmeans,
+            decay=decay,
+            eps=eps,
+            threshold_ema_dead_code=threshold_ema_dead_code,
+            use_ddp=sync_codebook,
+            learnable_codebook=has_codebook_orthogonal_loss or learnable_codebook,
+            sample_codebook_temp=sample_codebook_temp,
+            gumbel_sample=gumbel_sample_fn,
+            ema_update=ema_update
+        )
+
+        # 处理仿射参数,如果affine_param为真，则添加仿射参数相关的配置到codebook_kwargs中。这里还确保如果启用了仿射参数，则不能使用余弦相似度码本。
+        # 仿射参数通常用于在码本向量上应用一个线性变换，这可以进一步提高模型的表达能力。
+        if affine_param:
+            assert not use_cosine_sim, 'affine param is only compatible with euclidean codebook'
+            codebook_kwargs = dict(
+                **codebook_kwargs,
+                affine_param=True,
+                sync_affine_param=sync_affine_param,
+                affine_param_batch_decay=affine_param_batch_decay,
+                affine_param_codebook_decay=affine_param_codebook_decay,
+            )
+
+        self._codebook = codebook_class(**codebook_kwargs)
+
+        # 初始化码本优化器
+        self.in_place_codebook_optimizer = in_place_codebook_optimizer(self._codebook.parameters()) if exists(
+            in_place_codebook_optimizer) else None
+
+        self.codebook_size = codebook_size
+
+        # 设置图像特征图的接受标志
+        self.accept_image_fmap = accept_image_fmap
+        self.channel_last = channel_last
+
+    # 返回codebook。
+    # 如果separate_codebook_per_head为True，则直接返回原始的codebook；否则，它使用rearrange函数调整codebook的形状，去掉第一个维度（通常是批次维度）。
+    @property
+    def codebook(self):
+        codebook = self._codebook.embed
+
+        if self.separate_codebook_per_head:
+            return codebook
+
+        return rearrange(codebook, '1 ... -> ...')
+
+    # 允许设置codebook的值。
+    # 如果separate_codebook_per_head为False，则先调整codes的形状，使其具有批次维度。然后，使用copy_方法将codes复制到self._codebook.embed中。
+    @codebook.setter
+    def codebook(self, codes):
+        if not self.separate_codebook_per_head:
+            codes = rearrange(codes, '... -> 1 ...')
+
+        self._codebook.embed.copy_(codes)
+
+    # 根据提供的indices从codebook中获取对应的编码。
+    # 如果codebook是多头的（即其维度大于2），则使用pack_one和repeat函数来处理索引和codebook，以便能够正确地通过gather方法获取编码。最后，使用unpack_one函数恢复原始的形状。
+    def get_codes_from_indices(self, indices):
+        codebook = self.codebook
+        is_multiheaded = codebook.ndim > 2
+
+        if not is_multiheaded:
+            codes = codebook[indices]
+            return rearrange(codes, '... h d -> ... (h d)')
+
+        indices, ps = pack_one(indices, 'b * h')
+        indices = rearrange(indices, 'b n h -> b h n')
+
+        indices = repeat(indices, 'b h n -> b h n d', d=codebook.shape[-1])
+        codebook = repeat(codebook, 'h n d -> b h n d', b=indices.shape[0])
+
+        codes = codebook.gather(2, indices)
+        codes = rearrange(codes, 'b h n d -> b n (h d)')
+        codes = unpack_one(codes, ps, 'b * d')
+        return codes
+
+    # 首先使用get_codes_from_indices方法从indices中获取编码，然后调用project_out方法（该方法在提供的代码片段中未定义）对这些编码进行处理，并返回处理后的输出。
+    def get_output_from_indices(self, indices):
+        codes = self.get_codes_from_indices(indices)
+        return self.project_out(codes)
+
+    def forward(
+            self,
+            x,
+            indices=None,
+            mask=None,
+            sample_codebook_temp=None,
+            freeze_codebook=False
+    ):
+        orig_input = x
+
+        only_one = x.ndim == 2
+
+        # 如果x只有两个维度，则断言mask不存在（因为在这种情况下，mask没有意义），并使用rearrange函数给x增加一个额外的维度。
+        if only_one:
+            assert not exists(mask)
+            x = rearrange(x, 'b d -> b 1 d')
+
+        # shape: 获取输入x的形状。
+        # device: 获取输入x所在的设备（如CPU或GPU）。
+        # heads: 获取编码本的“头”的数量（可能是多头编码本的一个属性）。
+        # is_multiheaded: 判断编码本是否是多头的。
+        # codebook_size: 获取编码本的大小。
+        # return_loss: 判断是否要返回损失值，这取决于是否提供了indices。
+        shape, device, heads, is_multiheaded, codebook_size, return_loss = x.shape, x.device, self.heads, self.heads > 1, self.codebook_size, exists(
+            indices)
+
+        # need_transpose: 根据channel_last和accept_image_fmap的值判断输入数据是否需要转置。如果channel_last为False且accept_image_fmap也为False，则可能需要转置。
+        need_transpose = not self.channel_last and not self.accept_image_fmap
+        should_inplace_optimize = exists(self.in_place_codebook_optimizer)
+
+        # rearrange inputs 重新排列输入
+        # 如果模型接受图像特征图，则获取图像的高度和宽度，并使用rearrange函数将特征图的形状从(b, c, h, w)变为(b, h*w, c)，即将空间维度（高度和宽度）合并成一个维度。
+        if self.accept_image_fmap:
+            height, width = x.shape[-2:]
+            x = rearrange(x, 'b c h w -> b (h w) c')
+
+        # 如果之前判断需要转置，则使用rearrange函数将输入x的维度从(b, d, n)变为(b, n, d)。
+        if need_transpose:
+            # 使用project_in（可能是一个线性层或卷积层）对输入x进行投影，以将其转换到适当的空间或维度。
+            x = rearrange(x, 'b d n -> b n d')
+
+        # project input
+        # 使用project_in层（可能是线性层或卷积层）对输入x进行变换，将其投影到合适的特征空间。
+        x = self.project_in(x)
+
+        # handle multi-headed separate codebooks
+        # 处理多头单独的密码本
+        if is_multiheaded:
+            ein_rhs_eq = 'h b n d' if self.separate_codebook_per_head else '1 (b h) n d'
+            x = rearrange(x, f'b n (h d) -> {ein_rhs_eq}', h=heads)
+
+        # l2norm for cosine sim, otherwise identity
+        # 调用编码本的transform_input方法（如果存在）对输入x进行变换，可能包括L2归一化等操作，以便后续计算余弦相似度。
+        x = self._codebook.transform_input(x)
+
+        # codebook forward kwargs 准备编码本前向传播的参数
+        # 准备一个字典codebook_forward_kwargs，包含编码本前向传播时可能需要的参数，如采样温度、掩码和是否冻结编码本。
+        codebook_forward_kwargs = dict(
+            sample_codebook_temp=sample_codebook_temp,
+            mask=mask,
+            freeze_codebook=freeze_codebook
+        )
+
+        # quantize 量化
+
+        quantize, embed_ind, distances = self._codebook(x, **codebook_forward_kwargs)
+
+        # one step in-place update
+        # 如果模型配置了就地优化编码本（should_inplace_optimize为True），且当前处于训练模式（self.training为True），且没有冻结编码本（freeze_codebook为False），则执行以下操作：
+        # 根据掩码mask（如果存在）计算量化结果和输入之间的均方误差损失。
+        # 使用自动微分计算损失的梯度。
+        # 使用就地优化器self.in_place_codebook_optimizer更新编码本的参数。
+        # 清除梯度，为下一次优化迭代做准备。
+        # 再次调用编码本进行量化，以获取更新后的量化结果。
+        if should_inplace_optimize and self.training and not freeze_codebook:
+
+            if exists(mask):
+                loss = F.mse_loss(quantize, x.detach(), reduction='none')
+
+                loss_mask = mask
+                if is_multiheaded:
+                    loss_mask = repeat(mask, 'b n -> c (b h) n', c=loss.shape[0], h=loss.shape[1] // mask.shape[0])
+
+                loss = loss[loss_mask].mean()
+
+            else:
+                loss = F.mse_loss(quantize, x.detach())
+
+            loss.backward()
+            self.in_place_codebook_optimizer.step()
+            self.in_place_codebook_optimizer.zero_grad()
+
+            # quantize again
+
+            quantize, embed_ind, distances = self._codebook(x, **codebook_forward_kwargs)
+
+        # 判断是否处于训练模式,决定是否在计算承诺损失时分离梯度
+        if self.training:
+            # determine code to use for commitment loss
+            maybe_detach = torch.detach if not self.learnable_codebook or freeze_codebook else identity
+
+            commit_quantize = maybe_detach(quantize)
+
+            # straight through 直通估计
+            # 表达式x + (quantize - x).detach()确保了quantize与输入x之间的差异是可导的，但梯度不会通过quantize反向传播回编码本。
+            # 这允许在训练过程中通过反向传播来更新输入x，同时保持quantize作为离散的量化值。
+            quantize = x + (quantize - x).detach()
+
+            if self.sync_update_v > 0.:
+                # (21) in https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
+                quantize = quantize + self.sync_update_v * (quantize - quantize.detach())
+
+        # function for calculating cross entropy loss to distance matrix  计算距离矩阵交叉熵损失的函数
+        # used for (1) naturalspeech2 training residual vq latents to be close to the correct codes and (2) cross-entropy based commitment loss
+
+        # 这个函数用于计算交叉熵损失。
+        # 它首先根据是否是多头（multiheaded）以及每个头是否有独立的编码本（codebook）来确定张量重排的方式（dist_einops_eq）。
+        # 使用 rearrange 函数对 distances 进行重排，使其具有正确的形状来匹配 codes。
+        # 使用 F.cross_entropy 计算交叉熵损失。ignore_index=-1 表示在计算损失时忽略索引为 -1 的类别。
+        def calculate_ce_loss(codes):
+            if not is_multiheaded:
+                dist_einops_eq = '1 b n l -> b l n'
+            elif self.separate_codebook_per_head:
+                dist_einops_eq = 'c b n l -> b l n c'
+            else:
+                dist_einops_eq = '1 (b h) n l -> b l n h'
+
+            ce_loss = F.cross_entropy(
+                rearrange(distances, dist_einops_eq, b=shape[0]),
+                codes,
+                ignore_index=-1
+            )
+
+            return ce_loss
+
+        # if returning cross entropy loss on codes that were passed in
+        # 如果 return_loss 为 True，则函数返回 quantize（可能是一个量化后的张量）和通过 calculate_ce_loss(indices) 计算得到的交叉熵损失。
+        if return_loss:
+            return quantize, calculate_ce_loss(indices)
+
+        # transform embedding indices  变换嵌入指标
+
+        # 如果模型是多头的，代码会根据是否每个头有独立的编码本来对 embed_ind 进行重排。
+        if is_multiheaded:
+            if self.separate_codebook_per_head:
+                embed_ind = rearrange(embed_ind, 'h b n -> b n h', h=heads)
+            else:
+                embed_ind = rearrange(embed_ind, '1 (b h) n -> b n h', h=heads)
+
+        # # 如果模型接受图像的特征图（image feature map），embed_ind 会被进一步重排以匹配特征图的形状。
+        if self.accept_image_fmap:
+            embed_ind = rearrange(embed_ind, 'b (h w) ... -> b h w ...', h=height, w=width)
+
+        # # 如果 only_one 为 True，embed_ind 会被重排以去掉一个维度。
+        if only_one:
+            embed_ind = rearrange(embed_ind, 'b 1 ... -> b ...')
+
+        # aggregate loss 总损失
+
+        loss = torch.tensor([0.], device=device, requires_grad=self.training)
+
+        if self.training:  # 检查是否处于训练模式
+            if self.commitment_weight > 0:  # 检查 commitment weight,确保 commitment loss 的权重大于 0，否则不计算。
+                if self.commitment_use_cross_entropy_loss:  # 如果设置为使用交叉熵损失来计算 commitment loss，
+                    # if exists(mask): 如果存在掩码（mask），则用它来过滤出需要计算损失的部分。
+                    # 对于多头（multiheaded）模型，掩码需要重复以匹配嵌入（embedding）的维度。
+                    # embed_ind.masked_fill_(~ce_loss_mask, -1)：使用掩码将不需要计算损失的部分填充为 -1。
+                    # commit_loss = calculate_ce_loss(embed_ind)：调用之前定义的函数来计算交叉熵损失。
+                    if exists(mask):
+                        ce_loss_mask = mask
+                        if is_multiheaded:
+                            ce_loss_mask = repeat(ce_loss_mask, 'b n -> b n h', h=heads)
+
+                        embed_ind.masked_fill_(~ce_loss_mask, -1)
+
+                    commit_loss = calculate_ce_loss(embed_ind)
+                # 否则，使用均方误差（MSE）损失来计算 commitment loss：
+                # 如果存在掩码，使用掩码来过滤出需要计算损失的部分。
+                # 对于多头模型，同样需要重复掩码。
+                # commit_loss = commit_quantize.mse_loss(x, reduction='none')：计算量化后的嵌入与原始输入 x 之间的均方误差损失，但此时不进行任何归约（reduction）。
+                # 使用掩码从计算出的损失中选择出需要的部分，并取平均值。
+                # 如果没有掩码，则直接计算整个嵌入和输入之间的均方误差损失。
+                else:
+                    if exists(mask):
+                        # with variable lengthed sequences
+                        commit_loss = F.mse_loss(commit_quantize, x, reduction='none')
+
+                        loss_mask = mask
+                        if is_multiheaded:
+                            loss_mask = repeat(loss_mask, 'b n -> c (b h) n', c=commit_loss.shape[0],
+                                               h=commit_loss.shape[1] // mask.shape[0])
+
+                        commit_loss = commit_loss[loss_mask].mean()
+                    else:
+                        commit_loss = F.mse_loss(commit_quantize, x)
+
+                # 添加 commitment loss 到总损失
+                loss = loss + commit_loss * self.commitment_weight
+
+            if self.has_codebook_orthogonal_loss:  # 判断是否设置了需要计算正交损失
+                codebook = self._codebook.embed
+
+                # only calculate orthogonal loss for the activated codes for this batch
+                # 只计算这批激活码的正交损耗
+                if self.orthogonal_reg_active_codes_only:
+                    # 保多头模型且每个头使用单独的编码本时，不计算仅激活编码的正交损失。
+                    assert not (
+                            is_multiheaded and self.separate_codebook_per_head), 'orthogonal regularization for only active codes not compatible with multi-headed with separate codebooks yet'
+                    # 获取当前批次中所有唯一激活的编码ID。
+                    unique_code_ids = torch.unique(embed_ind)
+                    # 根据这些ID从编码本中筛选出对应的嵌入向量。
+                    codebook = codebook[:, unique_code_ids]
+
+                # 获取编码本中向量的数量。
+                num_codes = codebook.shape[-2]
+
+                # 限制参与正交损失计算的向量数量
+                if exists(self.orthogonal_reg_max_codes) and num_codes > self.orthogonal_reg_max_codes:
+                    rand_ids = torch.randperm(num_codes, device=device)[:self.orthogonal_reg_max_codes]
+                    codebook = codebook[:, rand_ids]
+
+                # 计算正交损失
+                orthogonal_reg_loss = orthogonal_loss_fn(codebook)
+                # 添加正交损失到总损失
+                loss = loss + orthogonal_reg_loss * self.orthogonal_reg_weight
+
+        # handle multi-headed quantized embeddings 处理多头量化嵌入
+        # 如果模型是多头的，代码根据是否每个头有单独的编码本进行不同的处理：
+        if is_multiheaded:
+            # 每个头有单独的编码本：quantize的维度会被重新排列，使得每个头的维度（h）被整合到最后一个维度中，即形状从(h, b, n, d)变为(b, n, h*d)。
+            if self.separate_codebook_per_head:
+                quantize = rearrange(quantize, 'h b n d -> b n (h d)', h=heads)
+            # 所有头共享编码本：quantize的维度会被重新排列，并且增加一个额外的维度（大小为1），以兼容多头的情况，然后整合头的维度到最后一个维度中，即形状从(1, (b*h), n, d)变为(b, n, h*d)。
+            else:
+                quantize = rearrange(quantize, '1 (b h) n d -> b n (h d)', h=heads)
+
+        # project out
+        quantize = self.project_out(quantize)
+
+        # rearrange quantized embeddings 重新排列量化嵌入
+        if need_transpose:
+            quantize = rearrange(quantize, 'b n d -> b d n')
+
+        # 如果self.accept_image_fmap为真，并且提供了图像的高度和宽度（height和width），quantize的维度将被重新排列以匹配图像特征映射的形状，即形状从(b, n, c)变为(b, c, h, w)。
+        if self.accept_image_fmap:
+            quantize = rearrange(quantize, 'b (h w) c -> b c h w', h=height, w=width)
+
+        # 仅处理单个嵌入：
+        # 如果only_one为真，并且quantize的第二维度（n）为1，那么该维度将被移除。
+        if only_one:
+            quantize = rearrange(quantize, 'b 1 d -> b d')
+
+        # if masking, only return quantized for where mask has True
+        # 如果是掩码，只在掩码为True的地方返回量化
+        if exists(mask):
+            quantize = torch.where(
+                rearrange(mask, '... -> ... 1'),
+                quantize,
+                orig_input
+            )
+
+        return quantize, embed_ind, loss
