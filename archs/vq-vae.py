@@ -23,6 +23,31 @@ class  VectorQuantizer(nn.Module):
         return x, loss, stats
 
 
+class SeqVectorQuantizer(nn.Module):
+    def __init__(self, codebook_size, emb_dim, beta, use_cosine_sim=True):
+        super(SeqVectorQuantizer, self).__init__()
+        self.codebook_size = codebook_size
+        self.emb_dim = emb_dim
+        self.beta = beta
+        self.use_cosine_sim = use_cosine_sim
+        self.codebook = vq.vectorquantizer(self.codebook_size, self.emb_dim, beta=self.beta,
+                                           use_cosine_sim=self.use_cosine_sim)
+
+    def forward(self, x):
+        batch, channels, length = x.shape
+        quantized = torch.zeros_like(x)
+        losses = torch.zeros(batch, length)
+
+        # Assume x is [batch, emb_dim, seq_length]
+        for i in range(length):
+            frame = x[:, :, i:i + 1]  # Take each frame separately
+            q_frame, loss, _ = self.codebook(frame)
+            quantized[:, :, i:i + 1] = q_frame
+            losses[:, i] = loss
+
+        average_loss = losses.mean()  # or however you want to handle the per-frame loss
+        return quantized, average_loss, {}
+
 
 
 def normalize(num_channels, type='group'):
@@ -39,7 +64,7 @@ def normalize(num_channels, type='group'):
     if type == 'group':
         return nn.GroupNorm(num_groups=32, num_channels=num_channels, eps=1e-6, affine=True)
     elif type == 'batch':
-        return nn.BatchNorm1d(num_channels)
+        return nn.BatchNorm2d(num_channels)
     else:
         raise ValueError("Unsupported normalization type. Expected 'group' or 'batch', got {}".format(type))
 
@@ -134,15 +159,15 @@ class Encoder(nn.Module):
         in_ch_mult = (1,) + tuple(ch_mult)
 
         blocks = []
-        # 初始卷积层 - 调整为一维
+        # 初始卷积层
         blocks.append(nn.Conv1d(in_channels, nf, kernel_size=3, stride=1, padding=1))
 
-        # 残差和下采样块，此处调整为一维操作
+        # 残差和下采样块
         for i in range(self.num_resolutions):
             block_in_ch = nf * in_ch_mult[i]
             block_out_ch = nf * ch_mult[i]
             for _ in range(self.num_res_blocks):
-                blocks.append(ResBlock(block_in_ch, block_out_ch))  # 需要定义一个一维的ResBlock
+                blocks.append(ResBlock(block_in_ch, block_out_ch))
                 block_in_ch = block_out_ch
 
             if i != self.num_resolutions - 1:
@@ -175,7 +200,7 @@ class Encoder(nn.Module):
             self.codebook_size = codebook_size
             self.embed_dim = emb_dim
             self.ch_mult = ch_mult
-            self.seq_len = None  # (音频长度)可以根据具体情况进行设置
+            self.seq_len = None  # 音频长度
             self.attn_resolutions = attn_resolutions
             self.quantizer_type = "nearest"  # 直接指定为"nearest"
             self.beta = beta
