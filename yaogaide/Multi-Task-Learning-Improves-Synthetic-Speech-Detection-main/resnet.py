@@ -419,17 +419,18 @@ if __name__ == '__main__':
     feat_mat = torch.from_numpy(feat_mat)
 
     print(feat_mat.shape)
-    feat_mat = dataset.repeat_padding(feat_mat, 750)
+    feat_mat = dataset.repeat_padding(feat_mat, 704)
+
     # feat_mat.view(1, 60, 231)
 
     # model = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
     # feat, mu = model(feat_mat)
     feat_mat = feat_mat.unsqueeze(0).float().unsqueeze(0)
+
+
+
     print(feat_mat.shape)
-
-
-
-    vqmodel = VQAutoEncoder(60, 750, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
+    vqmodel = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
     x, codebook_loss, quant_stats = vqmodel(feat_mat)
     attention = SelfAttention(256)
 

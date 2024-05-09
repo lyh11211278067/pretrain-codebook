@@ -3,6 +3,7 @@ import os
 import json
 import shutil
 from resnet import setup_seed, ResNet, Reconstruction_autoencoder,Conversion_autoencoder,Speaker_classifier
+from vqgan_arch import VQAutoEncoder
 from loss import *
 from dataset import ASVspoof2019
 from dataset_with_identity import ASVspoof2019_multi_speaker
@@ -30,7 +31,7 @@ def initParams():
                         default='./models/Re-ocsoftmax_ad/')
 
     # Dataset prepare
-    parser.add_argument("--feat_len", type=int, help="features length", default=750)
+    parser.add_argument("--feat_len", type=int, help="features length", default=704)
     parser.add_argument('--padding', type=str, default='repeat', choices=['zero', 'repeat'],
                         help="how to pad short utterance")
     parser.add_argument("--enc_dim", type=int, help="encoding dimension", default=256)
@@ -118,8 +119,7 @@ def train(args):
 
     id = [0,1]
 
-    lfcc_model = ResNet(3, args.enc_dim, resnet_type='34', nclasses=2, dropout1d=args.dropout1d,
-                        dropout2d=args.dropout2d, p=args.p).to(args.device)
+    lfcc_model = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
 
     lfcc_model = torch.nn.DataParallel(lfcc_model, device_ids=id)
     if args.S1:
