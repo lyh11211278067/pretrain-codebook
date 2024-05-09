@@ -2,7 +2,7 @@ import argparse
 import os
 import json
 import shutil
-from resnet import setup_seed, ResNet, Reconstruction_autoencoder,Conversion_autoencoder,Speaker_classifier
+from resnet import setup_seed, ResNet, Reconstruction_autoencoder,Conversion_autoencoder,Speaker_classifier,VQfeatextract
 from vqgan_arch import VQAutoEncoder
 from loss import *
 from dataset import ASVspoof2019
@@ -113,13 +113,43 @@ def adjust_learning_rate(args, optimizer, epoch_num):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
+def trainning(args):
+    vqvae_model = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
+    vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
+                                          betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
+    training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
+                                'LFCC', feat_len=args.feat_len, padding=args.padding)
+    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                 collate_fn=training_set.collate_fn)
+    for epoch_num in tqdm(range(args.num_epochs)):
+        vqvae_model.train()
+        trainlossDict = defaultdict(list)
+        adjust_learning_rate(args, vqvae_model_optimizer, epoch_num)
+        print('\nEpoch: %d ' % (epoch_num + 1))
+        for i, (lfcc, audio_fn, tags, labels, speaker) in enumerate(tqdm(trainDataLoader)):
+            lfcc = lfcc.unsqueeze(1).float().to(args.device)
+            recons, codebook_loss, _ = vqvae_model(lfcc)
+            total_loss = MSELoss(recons, lfcc, codebook_loss, weight=0.5)
+            vqvae_model_optimizer.zero_grad()
+            trainlossDict["vqvae"].append(total_loss.item())
+            total_loss.backward()
+            vqvae_model_optimizer.step()
+
+            if (i + 1) % 50 == 0:
+                print("[EPOCH: %3d] [TOTAL_LOSS: %.3f]\n" % (epoch_num + 1, total_loss))
+        torch.save(vqvae_model,
+                       os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_lfcc_model_%d.pt' % (epoch_num + 1)))
+
+
+
+
 
 def train(args):
     torch.set_default_tensor_type(torch.FloatTensor)
 
     id = [0,1]
 
-    lfcc_model = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
+    lfcc_model = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
 
     lfcc_model = torch.nn.DataParallel(lfcc_model, device_ids=id)
     if args.S1:
