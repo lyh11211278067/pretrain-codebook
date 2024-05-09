@@ -13,18 +13,17 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from basicsr.ops.dcn import ModulatedDeformConvPack, modulated_deform_conv
 from basicsr.utils import get_root_logger
 
-# 它接受一个模块列表（或一个单独的模块），并初始化这些模块的权重。主要是用于深度学习的神经网络模型初始化。
+
 @torch.no_grad()
 def default_init_weights(module_list, scale=1, bias_fill=0, **kwargs):
-    """
-    初始化网络权重。
+    """Initialize network weights.
 
-    参数:
-    (nn module_list(列表。Module] | n.Module):要初始化的模块。
-    scale (float):缩放初始化权重，特别是残差
-    块。默认值:1。
-    bias_fill (float):要填充偏置的值。默认值:0
-    kwargs (dict):初始化函数的其他参数。
+    Args:
+        module_list (list[nn.Module] | nn.Module): Modules to be initialized.
+        scale (float): Scale initialized weights, especially for residual
+            blocks. Default: 1.
+        bias_fill (float): The value to fill bias. Default: 0
+        kwargs (dict): Other arguments for initialization function.
     """
     if not isinstance(module_list, list):
         module_list = [module_list]
@@ -46,17 +45,15 @@ def default_init_weights(module_list, scale=1, bias_fill=0, **kwargs):
                     m.bias.data.fill_(bias_fill)
 
 
-# 创建由多个相同的基本块（basic_block）组成的神经网络层。
 def make_layer(basic_block, num_basic_block, **kwarg):
-    """
-    通过堆叠相同的块来制作层。
+    """Make layers by stacking the same blocks.
 
-    参数:
-    Basic_block (nn.module): nn。基本块的模块类。
-    Num_basic_block (int):块数量。
+    Args:
+        basic_block (nn.module): nn.module class for basic block.
+        num_basic_block (int): number of blocks.
 
-    返回:
-    神经网络。顺序的:以n.顺序的方式堆叠块。
+    Returns:
+        nn.Sequential: Stacked blocks in nn.Sequential.
     """
     layers = []
     for _ in range(num_basic_block):
@@ -64,22 +61,19 @@ def make_layer(basic_block, num_basic_block, **kwarg):
     return nn.Sequential(*layers)
 
 
-# 表示一个没有批量归一化（Batch Normalization，简称BN）的残差块。
-# 卷积-ReLU-卷积，然后加上输入，形成残差连接。
 class ResidualBlockNoBN(nn.Module):
-    """
-    没有BN的剩余块。
+    """Residual block without BN.
 
-    它的风格是:
-    ——Conv-ReLU-Conv - +
-    |________________|
+    It has a style of:
+        ---Conv-ReLU-Conv-+-
+         |________________|
 
-    参数:
-    num_feat (int):中间特征的通道号。
-    默认值:64。
-    res_scale (float):剩余比例尺。默认值:1。
-    pytorch_init (bool):如果设置为True，则使用pytorch默认的init，
-    否则，使用default_init_weights。默认值:False。
+    Args:
+        num_feat (int): Channel number of intermediate features.
+            Default: 64.
+        res_scale (float): Residual scale. Default: 1.
+        pytorch_init (bool): If set to True, use pytorch default init,
+            otherwise, use default_init_weights. Default: False.
     """
 
     def __init__(self, num_feat=64, res_scale=1, pytorch_init=False):
@@ -98,14 +92,12 @@ class ResidualBlockNoBN(nn.Module):
         return identity + out * self.res_scale
 
 
-# 用于上采样（放大）特征图。
 class Upsample(nn.Sequential):
-    """
-    Upsample模块。
+    """Upsample module.
 
-    参数:
-    scale (int):比例因子。支持的尺度:2^n和3。
-    num_feat (int):中间特征的通道号。
+    Args:
+        scale (int): Scale factor. Supported scales: 2^n and 3.
+        num_feat (int): Channel number of intermediate features.
     """
 
     def __init__(self, scale, num_feat):
@@ -122,23 +114,21 @@ class Upsample(nn.Sequential):
         super(Upsample, self).__init__(*m)
 
 
-# 用于根据给定的光流场（flow field）来扭曲图像或特征图。光流通常用于描述图像中像素或特征点的运动模式。
 def flow_warp(x, flow, interp_mode='bilinear', padding_mode='zeros', align_corners=True):
-    """
-    用光流扭曲图像或特征图。
+    """Warp an image or feature map with optical flow.
 
-    参数:
-    x(张量):大小为(n, c, h, w)的张量。
-    flow(张量):大小为(n, h, w, 2)的张量，正常值。
-    Interp_mode (str): 'nearest'或'bilinear'。默认值:“双线性”。
-    Padding_mode (str): ' 0 '或'border'或'reflection'。
-    默认值:“0”。
-    align_corners (bool):在pytorch 1.3之前，默认值为
-    align_corners = True。pytorch 1.3之后，默认值为
-    align_corners = False。这里，我们使用True作为默认值。
+    Args:
+        x (Tensor): Tensor with size (n, c, h, w).
+        flow (Tensor): Tensor with size (n, h, w, 2), normal value.
+        interp_mode (str): 'nearest' or 'bilinear'. Default: 'bilinear'.
+        padding_mode (str): 'zeros' or 'border' or 'reflection'.
+            Default: 'zeros'.
+        align_corners (bool): Before pytorch 1.3, the default value is
+            align_corners=True. After pytorch 1.3, the default value is
+            align_corners=False. Here, we use the True as default.
 
-    返回:
-    张量:扭曲的图像或特征映射。
+    Returns:
+        Tensor: Warped image or feature map.
     """
     assert x.size()[-2:] == flow.size()[1:3]
     _, _, h, w = x.size()
@@ -158,27 +148,25 @@ def flow_warp(x, flow, interp_mode='bilinear', padding_mode='zeros', align_corne
     return output
 
 
-# 用于根据指定的尺寸类型（比率或形状）调整光流（flow）的大小。光流通常用于计算机视觉任务中，表示图像中像素或特征点在不同帧之间的运动。
 def resize_flow(flow, size_type, sizes, interp_mode='bilinear', align_corners=False):
-    """
-    根据比率或形状调整流的大小。
+    """Resize a flow according to ratio or shape.
 
-    参数:
-    flow(张量):预先计算的流量。形状[N, 2, H, W]。
-    Size_type (str): 'ratio'或'shape'。
-    Sizes (list[int | float]):调整大小或最终输出的比率
-    形状。
-    1)比值顺序应为[ratio_h, ratio_w]。为
-    下采样时，比值应小于1.0(即比值)
-    < 1.0)。对于上采样，比值应大于1.0(即
-    比值> 1.0)。
-    2) output_size的顺序应为[out_h, out_w]。
-    interp_mode (str):调整大小的插值模式。
-    默认值:“双线性”。
-    align_corners (bool):是否对齐角。默认值:False。
+    Args:
+        flow (Tensor): Precomputed flow. shape [N, 2, H, W].
+        size_type (str): 'ratio' or 'shape'.
+        sizes (list[int | float]): the ratio for resizing or the final output
+            shape.
+            1) The order of ratio should be [ratio_h, ratio_w]. For
+            downsampling, the ratio should be smaller than 1.0 (i.e., ratio
+            < 1.0). For upsampling, the ratio should be larger than 1.0 (i.e.,
+            ratio > 1.0).
+            2) The order of output_size should be [out_h, out_w].
+        interp_mode (str): The mode of interpolation for resizing.
+            Default: 'bilinear'.
+        align_corners (bool): Whether align corners. Default: False.
 
-    返回:
-    张量:调整流量大小。
+    Returns:
+        Tensor: Resized flow.
     """
     _, _, flow_h, flow_w = flow.size()
     if size_type == 'ratio':
@@ -198,19 +186,16 @@ def resize_flow(flow, size_type, sizes, interp_mode='bilinear', align_corners=Fa
     return resized_flow
 
 
-# 该函数用于执行像素级反洗牌（unshuffle）操作的。这种操作通常用于将经过像素洗牌（shuffle）操作后的特征图恢复回原始的形状。
-# 像素洗牌通常用于将特征图的通道数减少，同时将空间分辨率提高，这在某些神经网络结构（如PixelShuffle）中用于上采样。
 # TODO: may write a cpp file
 def pixel_unshuffle(x, scale):
-    """
-    像素unshuffle。
+    """ Pixel unshuffle.
 
-    参数:
-    x(张量):形状为(b, c, hh, hw)的输入特征。
-    scale (int):下采样比。
+    Args:
+        x (Tensor): Input feature with shape (b, c, hh, hw).
+        scale (int): Downsample ratio.
 
-    返回:
-    张量:像素未洗牌特征。
+    Returns:
+        Tensor: the pixel unshuffled feature.
     """
     b, c, hh, hw = x.size()
     out_channel = c * (scale**2)
@@ -221,17 +206,15 @@ def pixel_unshuffle(x, scale):
     return x_view.permute(0, 1, 3, 5, 2, 4).reshape(b, out_channel, h, w)
 
 
-# 这个类实现了一个可变形对齐的调制可变形卷积操作，它不同于官方版本的DCNv2Pack，具有一些特殊的功能，如生成偏移和蒙版。
 class DCNv2Pack(ModulatedDeformConvPack):
-    """
-    用于可变形对齐的调制可变形转换。
+    """Modulated deformable conv for deformable alignment.
 
-    不同于官方的DCNv2Pack，它生成偏移和蒙版
-    与前面的特性不同，这个DCNv2Pack有另一个不同之处
-    生成偏移和蒙版的功能。
+    Different from the official DCNv2Pack, which generates offsets and masks
+    from the preceding features, this DCNv2Pack takes another different
+    features to generate offsets and masks.
 
-    裁判:
-    深入研究视频超分辨率的可变形对齐。
+    Ref:
+        Delving Deep into Deformable Alignment in Video Super-Resolution.
     """
 
     def forward(self, x, feat):
@@ -252,8 +235,7 @@ class DCNv2Pack(ModulatedDeformConvPack):
             return modulated_deform_conv(x, offset, mask, self.weight, self.bias, self.stride, self.padding,
                                          self.dilation, self.groups, self.deformable_groups)
 
-# 实现了一个截断正态分布（truncated normal distribution）的初始化方法，用于初始化PyTorch中的张量（tensor）。
-# 截断正态分布是在给定区间 [a, b] 内对正态分布进行截断得到的分布。
+
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     # From: https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/layers/weight_init.py
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
@@ -269,16 +251,18 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
             stacklevel=2)
 
     with torch.no_grad():
-        # 值是通过使用截断均匀分布和
-        # 然后对正态分布使用逆CDF。
-        # 获取cdf的上下值
+        # Values are generated by using a truncated uniform distribution and
+        # then using the inverse CDF for the normal distribution.
+        # Get upper and lower cdf values
         low = norm_cdf((a - mean) / std)
         up = norm_cdf((b - mean) / std)
 
-        # 用[low, up]的值均匀填充张量，然后转换为[2l-1, 2u-1].
+        # Uniformly fill tensor with values from [low, up], then translate to
+        # [2l-1, 2u-1].
         tensor.uniform_(2 * low - 1, 2 * up - 1)
 
-        # 对正态分布使用逆cdf变换得到截断标准常态
+        # Use inverse cdf transform for normal distribution to get truncated
+        # standard normal
         tensor.erfinv_()
 
         # Transform to proper mean, std
@@ -290,11 +274,9 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
         return tensor
 
 
-# 包装函数，它调用 _no_grad_trunc_normal_ 函数来初始化一个张量，使其值服从在 [a, b] 区间内截断的正态分布。
-# 这个截断正态分布意味着，从标准正态分布中抽取的值如果落在 [a, b] 区间之外，则会被重新抽取，直到它们落在该区间内为止。
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    r"""
-    使用从截断的对象中绘制的值填充输入张量正态分布。
+    r"""Fills the input Tensor with values drawn from a truncated
+    normal distribution.
 
     From: https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/layers/weight_init.py
 
@@ -304,13 +286,12 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     the bounds. The method used for generating the random values works
     best when :math:`a \leq \text{mean} \leq b`.
 
-
-    参数:
-    张量:一个n维的火炬。张量的
-    均值:正态分布的均值
-    Std:正态分布的标准差
-    A:最小截止值
-    B:最大截止值
+    Args:
+        tensor: an n-dimensional `torch.Tensor`
+        mean: the mean of the normal distribution
+        std: the standard deviation of the normal distribution
+        a: the minimum cutoff value
+        b: the maximum cutoff value
 
     Examples:
         >>> w = torch.empty(3, 5)
@@ -320,7 +301,6 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
 
 
 # From PyTorch
-# 工厂函数，它返回一个函数，该函数可以将输入转换为指定长度的元组。
 def _ntuple(n):
 
     def parse(x):
