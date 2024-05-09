@@ -137,8 +137,8 @@ def trainning(args):
 
             if (i + 1) % 50 == 0:
                 print("[EPOCH: %3d] [TOTAL_LOSS: %.3f]\n" % (epoch_num + 1, total_loss))
-        torch.save(vqvae_model,
-                       os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_lfcc_model_%d.pt' % (epoch_num + 1)))
+        torch.save(vqvae_model,os.path.join(args.out_fold, 'checkpoint', 'VQvae_model_%d.pt' % (epoch_num + 1)))
+    return vqvae_model
 
 
 
