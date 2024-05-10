@@ -9,7 +9,7 @@ torch.set_default_tensor_type(torch.FloatTensor)
 
 class ASVspoof2019(Dataset):
     def __init__(self, access_type, path_to_features, path_to_protocol, part='train', feature='LFCC',
-                 genuine_only=False, feat_len=750, padding='repeat', sel=''):
+                 genuine_only=False, feat_depth=64 ,feat_len=750, padding='repeat', sel=''):
         self.access_type = access_type
         self.path_to_features = path_to_features
         self.part = part
@@ -57,6 +57,8 @@ class ASVspoof2019(Dataset):
                 feat_mat = pickle.load(feature_handle)
 
         feat_mat = torch.from_numpy(feat_mat)
+        pad = (0, 0, 0, self.feat_depth - feat_mat.shape[0])
+        feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
         this_feat_len = feat_mat.shape[1]
         if this_feat_len > self.feat_len:
             startp = np.random.randint(this_feat_len-self.feat_len)

@@ -1,3 +1,6 @@
+import pickle
+from vqgan_arch import VQAutoEncoder
+import scipy.io as sio
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +8,7 @@ import torch.nn.init as init
 import os
 import random
 import numpy as np
+import dataset
 
 class SelfAttention(nn.Module):
     def __init__(self, hidden_size, mean_only=False):
@@ -402,3 +406,33 @@ class Speaker_classifier(nn.Module):
         x = F.relu(self.bn_2(self.fc_2(x)))
         y = self.fc_3(x)
         return y
+
+if __name__ == '__main__':
+    # path_to_mat = '/Users/jimmy/Documents/github项目/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LFCC_LA_T_9428272.mat'
+    # feature_handle = sio.loadmat(path_to_mat)
+    # feat_mat = feature_handle['x']
+    # feat_mat = torch.from_numpy(feat_mat)
+    # print(feat_mat.shape)
+    with open('/Users/jimmy/Documents/github项目/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001718LFCC.pkl', 'rb') as feature_handle:
+        feat_mat = pickle.load(feature_handle)
+
+    feat_mat = torch.from_numpy(feat_mat)
+
+    print(feat_mat.shape)
+    feat_mat = dataset.repeat_padding(feat_mat, 750)
+    # feat_mat.view(1, 60, 231)
+
+    # model = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
+    # feat, mu = model(feat_mat)
+    feat_mat = feat_mat.unsqueeze(0).float().unsqueeze(0)
+    print(feat_mat.shape)
+
+
+
+    vqmodel = VQAutoEncoder(60, 750, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
+    x, codebook_loss, quant_stats = vqmodel(feat_mat)
+    attention = SelfAttention(256)
+
+
+    print(x.shape)
+
