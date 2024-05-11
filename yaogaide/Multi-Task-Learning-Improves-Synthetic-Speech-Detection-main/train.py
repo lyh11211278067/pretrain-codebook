@@ -24,9 +24,9 @@ def initParams():
     parser.add_argument("-a", "--access_type", type=str, help="LA or PA", default='LA')
     # parser.add_argument("-d", "--path_to_database", type=str, help="dataset path", default='/data/neil/DS_10283_3336/')
     parser.add_argument("-f", "--path_to_features", type=str, help="features path",
-                        default='/data/users/yangli/AIR-ASVspoof-master/LAfeatures/')
+                        default='D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/')
     parser.add_argument("-p", "--path_to_protocol", type=str, help="protocol path",
-                        default='/data/users/yangli/LA/ASVspoof2019_LA_cm_protocols/')
+                        default='D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_cm_protocols/')
     parser.add_argument("-o", "--out_fold", type=str, help="output folder", required=True,
                         default='./models/Re-ocsoftmax_ad/')
 

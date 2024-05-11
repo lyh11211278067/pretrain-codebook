@@ -407,31 +407,60 @@ class Speaker_classifier(nn.Module):
         y = self.fc_3(x)
         return y
 
+class VQfeatextract(VQAutoEncoder):
+    def __init__(self, img_size, nf, ch_mult, quantizer="nearest", res_blocks=2, attn_resolutions=[16], codebook_size=1024, emb_dim=256,
+                beta=0.25, gumbel_straight_through=False, gumbel_kl_weight=1e-8, model_path=None,attention_depth=256, nclasses=2,enc_dim=256):
+        super(VQfeatextract, self).__init__(img_size, nf, ch_mult, quantizer, res_blocks, attn_resolutions, codebook_size, emb_dim,
+                beta, gumbel_straight_through, gumbel_kl_weight, model_path)
+        self.attention = SelfAttention(attention_depth)
+        self.activation = nn.ReLU()
+        self.bn1 = nn.BatchNorm1d(attention_depth)
+        self.fc = nn.Linear(256 * 2, enc_dim)
+        self.fc_mu = nn.Linear(enc_dim, nclasses) if nclasses >= 2 else nn.Linear(enc_dim, 1)
+
+
+
+    def forward(self, x):
+        x = self.encoder(x)
+        quant, codebook_loss, quant_stats = self.quantize(x)
+        x = quant.squeeze(2)
+        x = self.attention(x.permute(0, 2, 1).contiguous())
+        feat = self.fc(x)
+        mu = self.fc_mu(feat)
+        return feat, mu
+
+
 if __name__ == '__main__':
     # path_to_mat = '/Users/jimmy/Documents/github项目/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LFCC_LA_T_9428272.mat'
     # feature_handle = sio.loadmat(path_to_mat)
     # feat_mat = feature_handle['x']
     # feat_mat = torch.from_numpy(feat_mat)
     # print(feat_mat.shape)
-    with open('/Users/jimmy/Documents/github项目/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001718LFCC.pkl', 'rb') as feature_handle:
+    with open('D:/Pycharm/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001718LFCC.pkl', 'rb') as feature_handle:
         feat_mat = pickle.load(feature_handle)
 
     feat_mat = torch.from_numpy(feat_mat)
 
     print(feat_mat.shape)
-    feat_mat = dataset.repeat_padding(feat_mat, 750)
+    feat_mat = dataset.repeat_padding(feat_mat, 704)
+
     # feat_mat.view(1, 60, 231)
 
     # model = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
     # feat, mu = model(feat_mat)
     feat_mat = feat_mat.unsqueeze(0).float().unsqueeze(0)
+
+
+
     print(feat_mat.shape)
-
-
-
-    vqmodel = VQAutoEncoder(60, 750, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
+    vqmodel = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
     x, codebook_loss, quant_stats = vqmodel(feat_mat)
     attention = SelfAttention(256)
+
+    ResNet = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
+    x, mu = ResNet(feat_mat)
+    VQfeatextract = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
+    x,_ = VQfeatextract(feat_mat)
 
 
     print(x.shape)
