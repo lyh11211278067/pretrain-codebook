@@ -59,6 +59,11 @@ def initParams():
 
     parser.add_argument('--continue_training', action='store_true',
                         help="continue training with previously trained model")
+
+    # 这个是第一个stage训练完的vqvae模型
+    parser.add_argument('--trained_model', type=str, help="trained vqvae model",
+                        default='/data/users/yangli/LA/ASVspoof2019_LA_cm_protocols/')
+
     parser.add_argument('--S1', action='store_true', help="Assist by bonafide speech reconstruction.")
     parser.add_argument('--S2', action='store_true', help="Assist by spoofing voice conversion.")
     parser.add_argument('--S3', action='store_true', help="Assist by speaker classification.")
@@ -113,7 +118,7 @@ def adjust_learning_rate(args, optimizer, epoch_num):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def trainning(args):
+def train_firststage(args):
     vqvae_model = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
     vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
                                           betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
@@ -149,7 +154,10 @@ def train(args):
 
     id = [0,1]
 
-    lfcc_model = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
+    lfcc_model = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024,model_path=args.trained_model).to(args.device)
+
+    for paramiters in lfcc_model.quantize.parameters():
+        paramiters.requires_grad = False
 
     lfcc_model = torch.nn.DataParallel(lfcc_model, device_ids=id)
     if args.S1:
