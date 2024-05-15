@@ -421,9 +421,13 @@ class VQfeatextract(VQAutoEncoder):
 
 
     def forward(self, x):
+        print(x.shape)
         x = self.encoder(x)
+        print(x.shape)
         quant, codebook_loss, quant_stats = self.quantize(x)
+        print(quant.shape)
         x = quant.squeeze(2)
+        print(x.shape)
         x = self.attention(x.permute(0, 2, 1).contiguous())
         feat = self.fc(x)
         mu = self.fc_mu(feat)

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
-import vector_quantize_pytorch as vq
+
 
 
 def normalize(in_channels):
@@ -370,19 +370,22 @@ class VQAutoEncoder(nn.Module):
         )
 
         if model_path is not None:
-            chkpt = torch.load(model_path, map_location='cpu')
-            if 'params_ema' in chkpt:
-                self.load_state_dict(torch.load(model_path, map_location='cpu')['params_ema'])
-
-            elif 'params' in chkpt:
-                self.load_state_dict(torch.load(model_path, map_location='cpu')['params'])
-
-            else:
-                raise ValueError(f'Wrong params!')
+            self = torch.load(model_path, map_location='cpu')
+            # chkpt = torch.load(model_path, map_location='cpu')
+            # if 'params_ema' in chkpt:
+            #     self.load_state_dict(torch.load(model_path, map_location='cpu')['params_ema'])
+            #
+            # elif 'params' in chkpt:
+            #     self.load_state_dict(torch.load(model_path, map_location='cpu')['params'])
+            #
+            # else:
+            #     raise ValueError(f'Wrong params!')
 
 
     def forward(self, x):
+        print(x.shape)
         x = self.encoder(x)
+        print(x.shape)
         quant, codebook_loss, quant_stats = self.quantize(x)
         x = self.generator(quant)
         return x, codebook_loss, quant_stats

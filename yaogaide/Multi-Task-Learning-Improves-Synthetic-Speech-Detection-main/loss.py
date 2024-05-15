@@ -60,10 +60,9 @@ class AMSoftmax(nn.Module):
 
         return logits, margin_logits
 
+
 def MSELoss(recons, input, vq_loss,weight=0.5):
     recons_loss = F.mse_loss(recons, input)
     loss = recons_loss + vq_loss * weight
 
-    return {'loss': loss,
-            'Reconstruction_Loss': recons_loss,
-            'VQ_Loss': vq_loss}
+    return loss, recons_loss, vq_loss

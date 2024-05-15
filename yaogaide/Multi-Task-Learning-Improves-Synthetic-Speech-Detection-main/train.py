@@ -1,8 +1,10 @@
 import argparse
 import os
+import re
 import json
 import shutil
-from resnet import setup_seed, ResNet, Reconstruction_autoencoder,Conversion_autoencoder,Speaker_classifier,VQfeatextract
+from resnet import setup_seed, ResNet, Reconstruction_autoencoder, Conversion_autoencoder, Speaker_classifier, \
+    VQfeatextract
 from vqgan_arch import VQAutoEncoder
 from loss import *
 from dataset import ASVspoof2019
@@ -14,7 +16,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-torch.set_default_tensor_type(torch.FloatTensor)
+
+# torch.set_default_tensor_type(torch.FloatTensor)
 
 
 def initParams():
@@ -27,8 +30,8 @@ def initParams():
                         default='D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/')
     parser.add_argument("-p", "--path_to_protocol", type=str, help="protocol path",
                         default='D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_cm_protocols/')
-    parser.add_argument("-o", "--out_fold", type=str, help="output folder", required=True,
-                        default='./models/Re-ocsoftmax_ad/')
+    parser.add_argument("-o", "--out_fold", type=str, help="output folder",
+                        default='D:/Pycharm/pretrain-codebook/output/test_model/')
 
     # Dataset prepare
     parser.add_argument("--feat_len", type=int, help="features length", default=704)
@@ -37,8 +40,8 @@ def initParams():
     parser.add_argument("--enc_dim", type=int, help="encoding dimension", default=256)
 
     # Training hyperparameters
-    parser.add_argument('--num_epochs', type=int, default=100, help="Number of epochs for training")
-    parser.add_argument('--batch_size', type=int, default=64, help="Mini batch size for training")
+    parser.add_argument('--num_epochs', type=int, default=1, help="Number of epochs for training")
+    parser.add_argument('--batch_size', type=int, default=4, help="Mini batch size for training")
     parser.add_argument('--lr', type=float, default=0.0003, help="learning rate")
     parser.add_argument('--lr_decay', type=float, default=0.5, help="decay learning rate")
     parser.add_argument('--interval', type=int, default=10, help="interval to decay lr")
@@ -62,7 +65,10 @@ def initParams():
 
     # 这个是第一个stage训练完的vqvae模型
     parser.add_argument('--trained_model', type=str, help="trained vqvae model",
-                        default='/data/users/yangli/LA/ASVspoof2019_LA_cm_protocols/')
+                        default='D:/Pycharm/pretrain-codebook/output/')
+    # 要载入的模型地址
+    parser.add_argument('--load_training', type=str, help="location of trained vqvae model",
+                        default='D:/Pycharm/pretrain-codebook/output/checkpoint/VQvae_model_50.pt')
 
     parser.add_argument('--S1', action='store_true', help="Assist by bonafide speech reconstruction.")
     parser.add_argument('--S2', action='store_true', help="Assist by spoofing voice conversion.")
@@ -71,9 +77,12 @@ def initParams():
     parser.add_argument('--dropout2d', action='store_true', help="2D dropout for resnet")
     parser.add_argument('--p', type=float, default=0, help="dropout rate for resnet")
     parser.add_argument('--delta', type=float, default=1, help="Factor for controlling the coverage of CA.")
-    parser.add_argument('--lambda_r', type=float, default=0.04, help="Trade-off coefficient for bonafide speech reconstruction.")
-    parser.add_argument('--lambda_c', type=float, default=1, help="Trade-off coefficient for spoofing voice conversion.")
-    parser.add_argument('--lambda_m', type=float, default=0.01, help="Trade-off coefficient for speaker classification.")
+    parser.add_argument('--lambda_r', type=float, default=0.04,
+                        help="Trade-off coefficient for bonafide speech reconstruction.")
+    parser.add_argument('--lambda_c', type=float, default=1,
+                        help="Trade-off coefficient for spoofing voice conversion.")
+    parser.add_argument('--lambda_m', type=float, default=0.01,
+                        help="Trade-off coefficient for speaker classification.")
     args = parser.parse_args()
 
     setup_seed(args.seed)
@@ -118,12 +127,13 @@ def adjust_learning_rate(args, optimizer, epoch_num):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
+
 def train_firststage(args):
-    vqvae_model = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024).to(args.device)
+    vqvae_model = VQAutoEncoder(704, 64, [1, 2, 2, 4, 4, 8, 16], 'nearest', 2, [16], 1024).to(args.device)
     vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
-                                          betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
+                                             betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
-                                'LFCC', feat_len=args.feat_len, padding=args.padding)
+                                              'LFCC', feat_len=args.feat_len, padding=args.padding)
     trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
     for epoch_num in tqdm(range(args.num_epochs)):
@@ -134,32 +144,48 @@ def train_firststage(args):
         for i, (lfcc, audio_fn, tags, labels, speaker) in enumerate(tqdm(trainDataLoader)):
             lfcc = lfcc.unsqueeze(1).float().to(args.device)
             recons, codebook_loss, _ = vqvae_model(lfcc)
-            total_loss = MSELoss(recons, lfcc, codebook_loss, weight=0.5)
+            total_loss,_,_ = MSELoss(recons, lfcc, codebook_loss, weight=0.5)
+
+
             vqvae_model_optimizer.zero_grad()
-            trainlossDict["vqvae"].append(total_loss.item())
+            # trainlossDict["vqvae"].append(total_loss.item())
             total_loss.backward()
             vqvae_model_optimizer.step()
 
             if (i + 1) % 50 == 0:
                 print("[EPOCH: %3d] [TOTAL_LOSS: %.3f]\n" % (epoch_num + 1, total_loss))
-        torch.save(vqvae_model,os.path.join(args.out_fold, 'checkpoint', 'VQvae_model_%d.pt' % (epoch_num + 1)))
+        torch.save(vqvae_model, os.path.join(args.trained_model, 'checkpoint/VQvae_model_%d.pt' % (epoch_num + 1)))
     return vqvae_model
-
-
-
 
 
 def train(args):
     torch.set_default_tensor_type(torch.FloatTensor)
 
-    id = [0,1]
+    id = [0, 1]
 
-    lfcc_model = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024,model_path=args.trained_model).to(args.device)
+    model_files = os.listdir(os.path.join(args.trained_model, 'checkpoint'))
+
+    # 过滤出符合命名规范的模型文件
+    model_files = [f for f in model_files if re.match(r'VQvae_model_\d+\.pt', f)]
+
+    # 提取文件名中的 epoch 数，并找到最大的 epoch 数
+    if model_files:
+        max_epoch = max(int(re.search(r'VQvae_model_(\d+)\.pt', f).group(1)) for f in model_files)
+
+        # 找到最大的 epoch 对应的模型文件
+        latest_model_file = os.path.join(args.out_fold, f'checkpoint/VQvae_model_{max_epoch}.pt')
+
+        print(f"The latest model file for the last epoch is: {latest_model_file}")
+    else:
+        print("No model files found.")
+
+    lfcc_model = VQfeatextract(704, 64, [1, 2, 2, 4, 4, 8, 16], 'nearest', 2, [16], 1024,
+                               model_path=latest_model_file).to(args.device)
 
     for paramiters in lfcc_model.quantize.parameters():
         paramiters.requires_grad = False
 
-    lfcc_model = torch.nn.DataParallel(lfcc_model, device_ids=id)
+    lfcc_model = torch.nn.DataParallel(lfcc_model)
     if args.S1:
         inverse_model = Reconstruction_autoencoder(args.enc_dim, resnet_type='18', nclasses=2).to(args.device)
         inverse_model = torch.nn.DataParallel(inverse_model, device_ids=id)
@@ -167,7 +193,7 @@ def train(args):
         CA = Conversion_autoencoder(3, args.enc_dim).to(args.device)
         CA = torch.nn.DataParallel(CA, device_ids=id)
     if args.S3:
-        norm_classifier = Speaker_classifier(args.enc_dim,20).to(args.device)
+        norm_classifier = Speaker_classifier(args.enc_dim, 20).to(args.device)
         norm_classifier = torch.nn.DataParallel(norm_classifier, device_ids=id)
     if args.continue_training:
         lfcc_model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_lfcc_model.pt')).to(args.device)
@@ -183,12 +209,12 @@ def train(args):
                                           betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     if args.S2:
         CA_optimizer = torch.optim.Adam(CA.parameters(), lr=args.lr,
-                                          betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
+                                        betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     if args.S3:
-        classifier_optimizer =  torch.optim.Adam(norm_classifier.parameters(), lr=args.lr,
-                                          betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
+        classifier_optimizer = torch.optim.Adam(norm_classifier.parameters(), lr=args.lr,
+                                                betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
-                                'LFCC', feat_len=args.feat_len, padding=args.padding)
+                                              'LFCC', feat_len=args.feat_len, padding=args.padding)
     validation_set = ASVspoof2019(args.access_type, args.path_to_features, args.path_to_protocol, 'dev',
                                   'LFCC', feat_len=args.feat_len, padding=args.padding)
     trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
@@ -235,27 +261,26 @@ def train(args):
                 speaker = speaker.to(args.device)
                 index = (labels == 1).nonzero().squeeze()
                 feature_select = feats.index_select(0, index)
-                label_select_for_classify = speaker.index_select(0,index)
+                label_select_for_classify = speaker.index_select(0, index)
                 classifier_optimizer.zero_grad()
                 classify_result = norm_classifier(feature_select)
-                loss_speaker_norm = criterion(classify_result,label_select_for_classify)
+                loss_speaker_norm = criterion(classify_result, label_select_for_classify)
                 # print(label_select_for_classify)
-                loss_speaker_norm = loss_speaker_norm*args.lambda_m
-
+                loss_speaker_norm = loss_speaker_norm * args.lambda_m
 
             if args.S2 and args.add_loss == "softmax":
                 index = (labels == 0).nonzero().squeeze()
-                lfcc_select = lfcc.index_select(0,index)
+                lfcc_select = lfcc.index_select(0, index)
                 re_ad = CA(lfcc_select)
                 feats_ad, lfcc_outputs_ad = lfcc_model(re_ad)
                 loss_ad = criterion(lfcc_outputs_ad, labels.index_select(0, index))
-                lfcc_loss = loss_ad*args.lambda_c
+                lfcc_loss = loss_ad * args.lambda_c
                 if args.S3:
-                    lfcc_loss = lfcc_loss+loss_speaker_norm
+                    lfcc_loss = lfcc_loss + loss_speaker_norm
             else:
-                lfcc_loss=0
+                lfcc_loss = 0
                 if args.S3:
-                    lfcc_loss = lfcc_loss+loss_speaker_norm
+                    lfcc_loss = lfcc_loss + loss_speaker_norm
 
             if args.S1:
                 index = (labels == 1).nonzero().squeeze()
@@ -265,9 +290,9 @@ def train(args):
                 reconstruction_loss = torch.nn.MSELoss()
                 lfcc_ = lfcc.index_select(0, index)
                 loss2 = reconstruction_loss(lfcc_, lfcc_re) / len(index) * len(lfcc) * args.lambda_r
-                lfcc_loss = loss1 + loss2+lfcc_loss
+                lfcc_loss = loss1 + loss2 + lfcc_loss
             else:
-                lfcc_loss = loss1+lfcc_loss
+                lfcc_loss = loss1 + lfcc_loss
             if args.add_loss == "softmax":
                 lfcc_optimizer.zero_grad()
                 trainlossDict[args.add_loss].append(lfcc_loss.item())
@@ -281,7 +306,7 @@ def train(args):
                     re_ad = CA(lfcc_select)
                     feats_ad, lfcc_outputs_ad = lfcc_model(re_ad)
                     ocsoftmaxloss_adv, _ = ocsoftmax(feats_ad, labels.index_select(0, index))
-                    lfcc_loss = ocsoftmaxloss_adv * args.weight_loss*args.lambda_c
+                    lfcc_loss = ocsoftmaxloss_adv * args.weight_loss * args.lambda_c
                     if args.S3:
                         lfcc_loss = lfcc_loss + loss_speaker_norm
                 else:
@@ -289,10 +314,9 @@ def train(args):
                     if args.S3:
                         lfcc_loss = lfcc_loss + loss_speaker_norm
 
-
                 ocsoftmaxloss, _ = ocsoftmax(feats, labels)
                 loss1 = ocsoftmaxloss * args.weight_loss
-                lfcc_loss = loss1 + loss2+lfcc_loss if args.S1 else loss1+lfcc_loss
+                lfcc_loss = loss1 + loss2 + lfcc_loss if args.S1 else loss1 + lfcc_loss
                 lfcc_optimizer.zero_grad()
                 ocsoftmax_optimzer.zero_grad()
                 trainlossDict[args.add_loss].append(ocsoftmaxloss.item())
@@ -303,11 +327,11 @@ def train(args):
             if args.add_loss == "amsoftmax":
                 if args.S2:
                     index = (labels == 0).nonzero().squeeze()
-                    lfcc_select = lfcc.index_select(0,index)
+                    lfcc_select = lfcc.index_select(0, index)
                     re_ad = CA(lfcc_select)
                     feats_ad, lfcc_outputs_ad = lfcc_model(re_ad)
                     outputs_adv, moutputs_adv = amsoftmax_loss(feats_ad, labels.index_select(0, index))
-                    lfcc_loss = criterion(moutputs_adv, labels.index_select(0, index))*args.lambda_c
+                    lfcc_loss = criterion(moutputs_adv, labels.index_select(0, index)) * args.lambda_c
                     if args.S3:
                         lfcc_loss = lfcc_loss + loss_speaker_norm
                 else:
@@ -316,7 +340,7 @@ def train(args):
                         lfcc_loss = lfcc_loss + loss_speaker_norm
                 outputs, moutputs = amsoftmax_loss(feats, labels)
                 loss1 = criterion(moutputs, labels)
-                lfcc_loss = loss1 + loss2+lfcc_loss if args.S1 else loss1+lfcc_loss
+                lfcc_loss = loss1 + loss2 + lfcc_loss if args.S1 else loss1 + lfcc_loss
                 trainlossDict[args.add_loss].append(lfcc_loss.item())
                 lfcc_optimizer.zero_grad()
                 amsoftmax_optimzer.zero_grad()
@@ -328,9 +352,9 @@ def train(args):
                 classifier_optimizer.step()
             if args.S2:
                 alpha = args.delta
-                re_con_struct =  torch.nn.MSELoss()
+                re_con_struct = torch.nn.MSELoss()
                 index = (labels == 0).nonzero().squeeze()
-                lfcc_select = lfcc.index_select(0,index)
+                lfcc_select = lfcc.index_select(0, index)
                 re_ad = CA(lfcc_select)
                 feats_ad, lfcc_outputs_ad = lfcc_model(re_ad)
                 loss_recon = re_con_struct(re_ad, lfcc_select)
@@ -338,11 +362,11 @@ def train(args):
                 if args.add_loss == "softmax":
                     loss_ad = criterion(lfcc_outputs_ad, labels.index_select(0, index).fill_(1))
                 if args.add_loss == "ocsoftmax":
-                    loss_ad,_ = ocsoftmax(feats_ad, labels.index_select(0, index).fill_(1))
+                    loss_ad, _ = ocsoftmax(feats_ad, labels.index_select(0, index).fill_(1))
                 if args.add_loss == "amsoftmax":
                     outputs_ad, moutputs_adv_G = amsoftmax_loss(feats_ad, labels.index_select(0, index).fill_(1))
                     loss_ad = criterion(moutputs_adv_G, labels.index_select(0, index).fill_(1))
-                loss_for_G = alpha*loss_ad+loss_recon
+                loss_for_G = alpha * loss_ad + loss_recon
                 CA_optimizer.zero_grad()
                 loss_for_G.backward()
                 CA_optimizer.step()
@@ -352,8 +376,9 @@ def train(args):
             with open(os.path.join(args.out_fold, "train_loss.log"), "a") as log:
                 log.write(str(epoch_num) + "\t" + str(i) + "\t" +
                           str(np.nanmean(trainlossDict[monitor_loss])) + "\n")
-        torch.save(lfcc_model, os.path.join(args.out_fold, 'checkpoint','anti-spoofing_lfcc_model_%d.pt' % (epoch_num + 1)))
-        torch.save(CA, os.path.join(args.out_fold, 'checkpoint','anti-spoofing_CA_%d.pt' % (epoch_num + 1)))
+        torch.save(lfcc_model,
+                   os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_lfcc_model_%d.pt' % (epoch_num + 1)))
+        torch.save(CA, os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_CA_%d.pt' % (epoch_num + 1)))
         # Val the model
         lfcc_model.eval()
         with torch.no_grad():
@@ -434,10 +459,13 @@ def train(args):
 
 
 if __name__ == "__main__":
+    print(torch.cuda.is_available())
     args = initParams()
+    # _ = train_firststage(args)
+
     _, _ = train(args)
-    model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_lfcc_model.pt'))
-    if args.add_loss == "softmax":
-        loss_model = None
-    else:
-        loss_model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_loss_model.pt'))
+    # model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_lfcc_model.pt'))
+    # if args.add_loss == "softmax":
+    #     loss_model = None
+    # else:
+    #     loss_model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_loss_model.pt'))

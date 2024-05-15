@@ -20,6 +20,7 @@ class ASVspoof2019_multi_speaker(Dataset):
         self.genuine_only = genuine_only
         self.feat_len = feat_len
         self.feature = feature
+        self.feat_depth = feat_depth
         self.path_to_protocol = path_to_protocol
         self.padding = padding
         self.speaker_embedding = {
