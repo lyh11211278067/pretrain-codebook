@@ -30,6 +30,7 @@ def initParams():
                         default='D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/')
     parser.add_argument("-p", "--path_to_protocol", type=str, help="protocol path",
                         default='D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_cm_protocols/')
+    # stage2 模型的output
     parser.add_argument("-o", "--out_fold", type=str, help="output folder",
                         default='D:/Pycharm/pretrain-codebook/output/test_model/')
 
@@ -40,8 +41,11 @@ def initParams():
     parser.add_argument("--enc_dim", type=int, help="encoding dimension", default=256)
 
     # Training hyperparameters
-    parser.add_argument('--num_epochs', type=int, default=1, help="Number of epochs for training")
+    parser.add_argument('--num_epochs', type=int, default=50, help="Number of epochs for training")
+    parser.add_argument('--num_epochs_stage2', type=int, default=100, help="Number of epochs for training")
     parser.add_argument('--batch_size', type=int, default=4, help="Mini batch size for training")
+    parser.add_argument('--batch_size_stage2', type=int, default=4, help="Mini batch size for training")
+
     parser.add_argument('--lr', type=float, default=0.0003, help="learning rate")
     parser.add_argument('--lr_decay', type=float, default=0.5, help="decay learning rate")
     parser.add_argument('--interval', type=int, default=10, help="interval to decay lr")
@@ -217,9 +221,9 @@ def train(args):
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
     validation_set = ASVspoof2019(args.access_type, args.path_to_features, args.path_to_protocol, 'dev',
                                   'LFCC', feat_len=args.feat_len, padding=args.padding)
-    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size_stage2, shuffle=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
-    valDataLoader = DataLoader(validation_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+    valDataLoader = DataLoader(validation_set, batch_size=args.batch_size_stage2, shuffle=True, num_workers=args.num_workers,
                                collate_fn=validation_set.collate_fn)
 
     # feat, _, _, _ = training_set[29]
@@ -242,7 +246,7 @@ def train(args):
 
     monitor_loss = args.add_loss
 
-    for epoch_num in tqdm(range(args.num_epochs)):
+    for epoch_num in tqdm(range(args.num_epochs_stage2)):
         lfcc_model.train()
         trainlossDict = defaultdict(list)
         devlossDict = defaultdict(list)
