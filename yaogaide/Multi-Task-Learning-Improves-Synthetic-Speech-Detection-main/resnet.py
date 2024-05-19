@@ -210,7 +210,7 @@ class Reconstruction_autoencoder(nn.Module):
     def __init__(self, enc_dim, resnet_type='18', nclasses=2):
         super(Reconstruction_autoencoder, self).__init__()
 
-        self.fc = nn.Linear(enc_dim, 4 * 10 * 125)
+        self.fc = nn.Linear(enc_dim, 4 * 8 * 88)
         self.bn1 = nn.BatchNorm2d(4)
         self.activation = nn.ReLU()
 
@@ -234,11 +234,11 @@ class Reconstruction_autoencoder(nn.Module):
         )
 
     def forward(self, z):
-        z = self.fc(z).view((z.shape[0], 4, 10, 125))
+        z = self.fc(z).view((z.shape[0], 4, 8, 88))
         z = self.activation(self.bn1(z))
         z = self.layer1(z)
         z = self.layer2(z)
-        z = nn.functional.interpolate(z, scale_factor=3, mode="bilinear", align_corners=True)
+        z = nn.functional.interpolate(z, scale_factor=4, mode="bilinear", align_corners=True)
         z = self.layer3(z)
         z = nn.functional.interpolate(z, scale_factor=2, mode="bilinear", align_corners=True)
         z = self.layer4(z)
@@ -300,13 +300,13 @@ class Conversion_autoencoder(nn.Module):
 
         self._norm_layer = nn.BatchNorm2d
 
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=(9, 3), stride=(3, 2), padding=(1, 1), bias=False)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=(3,3), stride=(2,2), padding=(1,1), bias=False)
         self.bn1 = nn.BatchNorm2d(16)
         self.activation = nn.ReLU()
 
         self.layer1 = nn.Sequential(
             compress_block(16, 16, 1),
-            compress_block(16, 32, (2,3)),
+            compress_block(16, 32, 2),
         )
 
         self.layer2 = nn.Sequential(
@@ -338,12 +338,12 @@ class Conversion_autoencoder(nn.Module):
             PreActBlock(64, 32, 1),
         )
         self.layer3_i = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, 3, (2,3), 1,output_padding=(1,2)),
+            nn.ConvTranspose2d(64, 64, 3, 2, 1,output_padding=(1,2)),
             PreActBlock(64, 32, 1),
             PreActBlock(32, 16, 1)
         )
         self.layer4_i = nn.Sequential(
-            nn.ConvTranspose2d(32, 32, (9, 3), (3, 2), 1,output_padding=(2,1)),
+            nn.ConvTranspose2d(32, 32, (4, 2), 2, 1,output_padding=(2,1)),
             PreActBlock(32, 8, 1),
             PreActBlock(8, 4, 1),
             PreActBlock(4, 1, 1),
@@ -384,6 +384,9 @@ class Conversion_autoencoder(nn.Module):
         x_5 = self.layer4(x_4)
         y_1 = torch.cat([x_5,x_4],dim=1)
         y_2 = self.layer1_i(y_1)
+        print(y_1.shape)
+        print(y_2.shape)
+        print(x_3.shape)
         y_2 = torch.cat([y_2,x_3],dim=1)
         y_3 = self.layer2_i(y_2)
         y_3 = torch.cat([y_3,x_2],dim=1)
@@ -465,6 +468,7 @@ if __name__ == '__main__':
     x, mu = ResNet(feat_mat)
     VQfeatextract = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
     x,_ = VQfeatextract(feat_mat)
+    Conversion_autoencoder()
 
 
     print(x.shape)

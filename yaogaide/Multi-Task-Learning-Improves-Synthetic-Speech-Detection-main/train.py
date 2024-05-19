@@ -26,6 +26,8 @@ def initParams():
     # Data folder prepare
     parser.add_argument("-a", "--access_type", type=str, help="LA or PA", default='LA')
     # parser.add_argument("-d", "--path_to_database", type=str, help="dataset path", default='/data/neil/DS_10283_3336/')
+
+    # 用于指定特征的路径、指定协议文件的路径、指定输出文件夹的路径.
     parser.add_argument("-f", "--path_to_features", type=str, help="features path",
                         default='D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/')
     parser.add_argument("-p", "--path_to_protocol", type=str, help="protocol path",
@@ -35,35 +37,55 @@ def initParams():
                         default='D:/Pycharm/pretrain-codebook/output/test_model/')
 
     # Dataset prepare
+    # 用于指定特征的长度
+    # 用于指定如何处理较短的语音片段的填充
+    # 用于指定编码的维度
     parser.add_argument("--feat_len", type=int, help="features length", default=704)
     parser.add_argument('--padding', type=str, default='repeat', choices=['zero', 'repeat'],
                         help="how to pad short utterance")
     parser.add_argument("--enc_dim", type=int, help="encoding dimension", default=256)
 
-    # Training hyperparameters
+    # Training hyper parameters 训练超参数
+    # 用于指定训练的轮数
     parser.add_argument('--num_epochs', type=int, default=50, help="Number of epochs for training")
     parser.add_argument('--num_epochs_stage2', type=int, default=100, help="Number of epochs for training")
+    # 修改batch数量
     parser.add_argument('--batch_size', type=int, default=4, help="Mini batch size for training")
     parser.add_argument('--batch_size_stage2', type=int, default=4, help="Mini batch size for training")
 
+    # 学习率（learning rate）,用于控制训练过程中参数更新的步长
+    # 学习率衰减的比例,用于在训练过程中逐步减小学习率
+    # 学习率衰减的间隔,即每多少个epoch衰减一次学习率
     parser.add_argument('--lr', type=float, default=0.0003, help="learning rate")
     parser.add_argument('--lr_decay', type=float, default=0.5, help="decay learning rate")
     parser.add_argument('--interval', type=int, default=10, help="interval to decay lr")
 
+    # 设置Adam优化器中beta_1的值，用于控制一阶矩估计的指数衰减率
+    # 设置Adam优化器中beta_2的值，用于控制二阶矩估计的指数衰减率
+    # 设置Adam优化器中的epsilon值，用于防止除以零的操作
     parser.add_argument('--beta_1', type=float, default=0.9, help="bata_1 for Adam")
     parser.add_argument('--beta_2', type=float, default=0.999, help="beta_2 for Adam")
     parser.add_argument('--eps', type=float, default=1e-8, help="epsilon for Adam")
+
+    # 设置用于训练的GPU的索引
+    # 设置用于数据加载的工作进程数量
+    # 设置随机种子，用于确保实验的可重复性
     parser.add_argument("--gpu", type=str, help="GPU index", default="1")
     parser.add_argument('--num_workers', type=int, default=6, help="number of workers")
     parser.add_argument('--seed', type=int, help="random number seed", default=598)
 
+    # 设置用于训练的损失函数类型
+    # 设置其他损失的权重
     parser.add_argument('--add_loss', type=str, default="ocsoftmax",
                         choices=["softmax", 'amsoftmax', 'ocsoftmax'], help="loss for one-class training")
     parser.add_argument('--weight_loss', type=float, default=1, help="weight for other loss")
+
+    # 设置ocsoftmax损失函数中用于真实类别的r_real值,用于非真实类别的r_fake值,以及缩放因子alpha
     parser.add_argument('--r_real', type=float, default=0.9, help="r_real for ocsoftmax")
     parser.add_argument('--r_fake', type=float, default=0.2, help="r_fake for ocsoftmax")
     parser.add_argument('--alpha', type=float, default=20, help="scale factor for ocsoftmax")
 
+    # 是否继续训练,这个参数用于指定是否继续之前的训练。如果设置为 True，则训练过程将从先前保存的模型状态开始，而不是从头开始。
     parser.add_argument('--continue_training', action='store_true',
                         help="continue training with previously trained model")
 
@@ -74,20 +96,39 @@ def initParams():
     parser.add_argument('--load_training', type=str, help="location of trained vqvae model",
                         default='D:/Pycharm/pretrain-codebook/output/checkpoint/VQvae_model_50.pt')
 
+    # 1使用真实语音重建来辅助训练。2使用伪造语音转换来辅助训练。3使用说话人分类来辅助训练。
     parser.add_argument('--S1', action='store_true', help="Assist by bonafide speech reconstruction.")
     parser.add_argument('--S2', action='store_true', help="Assist by spoofing voice conversion.")
     parser.add_argument('--S3', action='store_true', help="Assist by speaker classification.")
+    # 是否在ResNet中使用一维dropout或二维dropout
     parser.add_argument('--dropout1d', action='store_true', help="1D dropout for resnet")
     parser.add_argument('--dropout2d', action='store_true', help="2D dropout for resnet")
+    # 设置ResNet中dropout层的丢弃率。
     parser.add_argument('--p', type=float, default=0, help="dropout rate for resnet")
+    # 控制注意力机制的覆盖的因子。
     parser.add_argument('--delta', type=float, default=1, help="Factor for controlling the coverage of CA.")
+
+    # parser.add_argument('--lambda_r', type=float, default=0.04,
+    #                     help="Trade-off coefficient for bonafide speech reconstruction.")
+    # parser.add_argument('--lambda_c', type=float, default=1,
+    #                     help="Trade-off coefficient for spoofing voice conversion.")
+    # parser.add_argument('--lambda_m', type=float, default=0.01,
+    #                     help="Trade-off coefficient for speaker classification.")
+
+    # 1真实语音重建的权衡系数。2伪造语音转换的权衡系数。3说话人分类的权衡系数。
     parser.add_argument('--lambda_r', type=float, default=0.04,
                         help="Trade-off coefficient for bonafide speech reconstruction.")
-    parser.add_argument('--lambda_c', type=float, default=1,
+    parser.add_argument('--lambda_c', type=float, default=0.0003,
                         help="Trade-off coefficient for spoofing voice conversion.")
-    parser.add_argument('--lambda_m', type=float, default=0.01,
+    parser.add_argument('--lambda_m', type=float, default=0.00005,
                         help="Trade-off coefficient for speaker classification.")
+
     args = parser.parse_args()
+
+    # 新加,S1 S2 S3默认为true
+    args.S1 = True
+    args.S2 = True
+    args.S3 = True
 
     setup_seed(args.seed)
     # Path for output data
@@ -165,7 +206,8 @@ def train_firststage(args):
 def train(args):
     torch.set_default_tensor_type(torch.FloatTensor)
 
-    id = [0, 1]
+    # id = [0,1]
+    id = [0]
 
     model_files = os.listdir(os.path.join(args.trained_model, 'checkpoint'))
 
@@ -177,7 +219,7 @@ def train(args):
         max_epoch = max(int(re.search(r'VQvae_model_(\d+)\.pt', f).group(1)) for f in model_files)
 
         # 找到最大的 epoch 对应的模型文件
-        latest_model_file = os.path.join(args.out_fold, f'checkpoint/VQvae_model_{max_epoch}.pt')
+        latest_model_file = os.path.join(args.trained_model, f'checkpoint/VQvae_model_{max_epoch}.pt')
 
         print(f"The latest model file for the last epoch is: {latest_model_file}")
     else:
@@ -290,6 +332,7 @@ def train(args):
                 index = (labels == 1).nonzero().squeeze()
                 feats_select = feats.index_select(0, index)
                 lfcc_re = inverse_model(feats_select)
+
                 # reconstruction_loss = torch.nn.L1Loss()
                 reconstruction_loss = torch.nn.MSELoss()
                 lfcc_ = lfcc.index_select(0, index)
