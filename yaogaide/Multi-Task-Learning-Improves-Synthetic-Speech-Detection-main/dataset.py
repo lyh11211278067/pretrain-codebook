@@ -16,6 +16,7 @@ class ASVspoof2019(Dataset):
         self.ptf = os.path.join(path_to_features, self.part)
         self.genuine_only = genuine_only
         self.feat_len = feat_len
+        self.feat_depth = feat_depth
         self.feature = feature
         self.path_to_protocol = path_to_protocol
         self.padding = padding

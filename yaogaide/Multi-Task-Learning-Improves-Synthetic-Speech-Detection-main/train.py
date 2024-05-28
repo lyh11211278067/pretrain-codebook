@@ -70,8 +70,8 @@ def initParams():
     # 设置用于训练的GPU的索引
     # 设置用于数据加载的工作进程数量
     # 设置随机种子，用于确保实验的可重复性
-    parser.add_argument("--gpu", type=str, help="GPU index", default="1")
-    parser.add_argument('--num_workers', type=int, default=6, help="number of workers")
+    parser.add_argument("--gpu", type=str, help="GPU index", default="0")
+    parser.add_argument('--num_workers', type=int, default=4, help="number of workers")
     parser.add_argument('--seed', type=int, help="random number seed", default=598)
 
     # 设置用于训练的损失函数类型
@@ -179,7 +179,7 @@ def train_firststage(args):
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
-    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
     for epoch_num in tqdm(range(args.num_epochs)):
         vqvae_model.train()
@@ -193,13 +193,18 @@ def train_firststage(args):
 
 
             vqvae_model_optimizer.zero_grad()
-            # trainlossDict["vqvae"].append(total_loss.item())
+            trainlossDict["vqvae"].append(total_loss.item())
             total_loss.backward()
             vqvae_model_optimizer.step()
 
             if (i + 1) % 50 == 0:
                 print("[EPOCH: %3d] [TOTAL_LOSS: %.3f]\n" % (epoch_num + 1, total_loss))
         torch.save(vqvae_model, os.path.join(args.trained_model, 'checkpoint/VQvae_model_%d.pt' % (epoch_num + 1)))
+
+        with open(os.path.join(args.out_fold, "checkpoint/train_loss.log"), "a") as log:
+            log.write(
+                str(epoch_num) + "\t" + str(np.nanmean(trainlossDict["vqvae"])) +"\n")
+
     return vqvae_model
 
 
@@ -263,9 +268,9 @@ def train(args):
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
     validation_set = ASVspoof2019(args.access_type, args.path_to_features, args.path_to_protocol, 'dev',
                                   'LFCC', feat_len=args.feat_len, padding=args.padding)
-    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size_stage2, shuffle=True, num_workers=args.num_workers,
+    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
-    valDataLoader = DataLoader(validation_set, batch_size=args.batch_size_stage2, shuffle=True, num_workers=args.num_workers,
+    valDataLoader = DataLoader(validation_set, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                collate_fn=validation_set.collate_fn)
 
     # feat, _, _, _ = training_set[29]
@@ -309,10 +314,16 @@ def train(args):
                 feature_select = feats.index_select(0, index)
                 label_select_for_classify = speaker.index_select(0, index)
                 classifier_optimizer.zero_grad()
-                classify_result = norm_classifier(feature_select)
-                loss_speaker_norm = criterion(classify_result, label_select_for_classify)
-                # print(label_select_for_classify)
-                loss_speaker_norm = loss_speaker_norm * args.lambda_m
+
+                # 前向传播之前检查feature_select的大小，如果发现批处理大小为1，则跳过这个批次的训练。
+                print(feature_select.shape)
+                if feature_select.size(0) > 1:
+                    classify_result = norm_classifier(feature_select)
+                    loss_speaker_norm = criterion(classify_result, label_select_for_classify)
+                    # print(label_select_for_classify)
+                    loss_speaker_norm = loss_speaker_norm * args.lambda_m
+                else:
+                    continue # 跳过这个批次
 
             if args.S2 and args.add_loss == "softmax":
                 index = (labels == 0).nonzero().squeeze()
@@ -336,7 +347,16 @@ def train(args):
                 # reconstruction_loss = torch.nn.L1Loss()
                 reconstruction_loss = torch.nn.MSELoss()
                 lfcc_ = lfcc.index_select(0, index)
+
+                if lfcc_.size(0) == 1:  # 当批次大小为1时特别处理
+                    # 进行适当的调整或计算
+                    continue  # 或者跳过此批次
+                print()
+                print(lfcc_.shape)
+                print(lfcc_re.shape)
+
                 loss2 = reconstruction_loss(lfcc_, lfcc_re) / len(index) * len(lfcc) * args.lambda_r
+
                 lfcc_loss = loss1 + loss2 + lfcc_loss
             else:
                 lfcc_loss = loss1 + lfcc_loss
@@ -425,7 +445,9 @@ def train(args):
                           str(np.nanmean(trainlossDict[monitor_loss])) + "\n")
         torch.save(lfcc_model,
                    os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_lfcc_model_%d.pt' % (epoch_num + 1)))
+        # 如果不使用S2模块，以下保存CA模型的代码应该被注释掉或删除
         torch.save(CA, os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_CA_%d.pt' % (epoch_num + 1)))
+
         # Val the model
         lfcc_model.eval()
         with torch.no_grad():
@@ -510,7 +532,7 @@ if __name__ == "__main__":
     args = initParams()
     # _ = train_firststage(args)
 
-    _, _ = train(args)
+    # _, _ = train(args)
     # model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_lfcc_model.pt'))
     # if args.add_loss == "softmax":
     #     loss_model = None

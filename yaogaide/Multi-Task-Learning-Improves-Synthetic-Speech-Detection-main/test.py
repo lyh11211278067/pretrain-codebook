@@ -25,9 +25,9 @@ def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
     # if add_loss != "softmax":
     #     loss_model = nn.DataParallel(loss_model, list(range(torch.cuda.device_count())))
     test_set = ASVspoof2019("LA", file,
-                            "/data/users/yangli/LA/ASVspoof2019_LA_cm_protocols/", part,
-                            "LFCC", feat_len=750, padding="repeat")
-    testDataLoader = DataLoader(test_set, batch_size=32, shuffle=False, num_workers=3,
+                            "D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_cm_protocols/", part,
+                            "LFCC", feat_len=704, padding="repeat")
+    testDataLoader = DataLoader(test_set, batch_size=4, shuffle=False, drop_last=True, num_workers=3,
                                 collate_fn=test_set.collate_fn)
     model.eval()
 
@@ -54,7 +54,7 @@ def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
                                           score[j].item()))
 
     eer_cm, min_tDCF = compute_eer_and_tdcf(os.path.join(dir_path, 'checkpoint_cm_score.txt'),
-                                            "/data/users/yangli")
+                                            "D:/Pycharm/pretrain-codebook/")
                                             
     with open("result.txt","a") as result_file:
         result_file.write("\n"+feat_model_path+"\n")
@@ -68,11 +68,13 @@ def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
 def test(model_dir, add_loss, device, file):
     model_path = os.path.join(model_dir, "anti-spoofing_lfcc_model.pt")
     loss_model_path = os.path.join(model_dir, "anti-spoofing_loss_model.pt")
-    eer_cm, min_tDCF = test_model(model_path, loss_model_path, "eval", add_loss, device, file) 
+    eer_cm, min_tDCF = test_model(model_path, loss_model_path, "eval", add_loss, device, file)
+    print(eer_cm)
+    print(min_tDCF)
 
 def test_individual_attacks(cm_score_file):
-    asv_score_file = os.path.join('/data/users/yangli',
-                                  'LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt')
+    asv_score_file = os.path.join('D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt')
+    # asv_score_file = 'D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt'
 
     # Fix tandem detection cost function (t-DCF) parameters
     Pspoof = 0.05
@@ -90,14 +92,14 @@ def test_individual_attacks(cm_score_file):
     asv_data = np.genfromtxt(asv_score_file, dtype=str)
     asv_sources = asv_data[:, 0]
     asv_keys = asv_data[:, 1]
-    asv_scores = asv_data[:, 2].astype(np.float)
+    asv_scores = asv_data[:, 2].astype(float)
 
     # Load CM scores
     cm_data = np.genfromtxt(cm_score_file, dtype=str)
     cm_utt_id = cm_data[:, 0]
     cm_sources = cm_data[:, 1]
     cm_keys = cm_data[:, 2]
-    cm_scores = cm_data[:, 3].astype(np.float)
+    cm_scores = cm_data[:, 3].astype(float)
 
     other_cm_scores = -cm_scores
 
@@ -143,11 +145,11 @@ def test_individual_attacks(cm_score_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('-m', '--model_dir', type=str, help="path to the trained model", default="./models/imfcc")
+    parser.add_argument('-m', '--model_dir', type=str, help="path to the trained model", default="D:/Pycharm/pretrain-codebook/output/test_model/")
     parser.add_argument('-l', '--loss', type=str, default="ocsoftmax",
                         choices=["softmax", 'amsoftmax', 'ocsoftmax'], help="loss function")
     parser.add_argument("--gpu", type=str, help="GPU index", default="0")
-    parser.add_argument('-f', "--path_to_features", type=str, help="path to the feature file", default="/data/users/yangli/AIR-ASVspoof-master/")
+    parser.add_argument('-f', "--path_to_features", type=str, help="path to the feature file", default="D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/")
     args = parser.parse_args()
     args.device = torch.device("cuda:{:d}".format(int(args.gpu)) if torch.cuda.is_available() else "cpu")
     test(args.model_dir, args.loss, args.device, args.path_to_features)

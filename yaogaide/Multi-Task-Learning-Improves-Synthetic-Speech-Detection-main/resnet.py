@@ -10,6 +10,7 @@ import random
 import numpy as np
 import dataset
 
+
 class SelfAttention(nn.Module):
     def __init__(self, hidden_size, mean_only=False):
         super(SelfAttention, self).__init__()
@@ -108,13 +109,13 @@ def conv1x1(in_planes, out_planes, stride=1):
 
 
 RESNET_CONFIGS = {
-                  'recon': [[1, 1, 1, 1], PreActBlock],
-                  '18': [[2, 2, 2, 2], PreActBlock],
-                  '28': [[3, 4, 6, 3], PreActBlock],
-                  '34': [[3, 4, 6, 3], PreActBlock],
-                  '50': [[3, 4, 6, 3], PreActBottleneck],
-                  '101': [[3, 4, 23, 3], PreActBottleneck]
-                  }
+    'recon': [[1, 1, 1, 1], PreActBlock],
+    '18': [[2, 2, 2, 2], PreActBlock],
+    '28': [[3, 4, 6, 3], PreActBlock],
+    '34': [[3, 4, 6, 3], PreActBlock],
+    '50': [[3, 4, 6, 3], PreActBottleneck],
+    '101': [[3, 4, 23, 3], PreActBottleneck]
+}
 
 
 def setup_seed(random_seed, cudnn_deterministic=True):
@@ -190,7 +191,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-
+        print(f"Forward input size: {x.size()}")  # 打印输入大小
         x = self.conv1(x)
         x = self.activation(self.bn1(x))
         x = self.layer1(x)
@@ -247,6 +248,7 @@ class Reconstruction_autoencoder(nn.Module):
 
 class compress_Block(nn.Module):
     expansion = 1
+
     def __init__(self, in_planes, planes, stride, *args, **kwargs):
         super(compress_Block, self).__init__()
         self.bn1 = nn.BatchNorm2d(in_planes)
@@ -267,12 +269,11 @@ class compress_Block(nn.Module):
         return out
 
 
-
 class compress_block(nn.Module):
     '''Pre-activation version of the BasicBlock.'''
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride,*args, **kwargs):
+    def __init__(self, in_planes, planes, stride, *args, **kwargs):
         super(compress_block, self).__init__()
         self.bn1 = nn.BatchNorm2d(in_planes)
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -280,7 +281,6 @@ class compress_block(nn.Module):
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         self.shortcut = nn.Sequential(
             nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False))
-
 
     def forward(self, x):
         out = F.relu(self.bn1(x))
@@ -300,7 +300,7 @@ class Conversion_autoencoder(nn.Module):
 
         self._norm_layer = nn.BatchNorm2d
 
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=(3,3), stride=(2,2), padding=(1,1), bias=False)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
         self.bn1 = nn.BatchNorm2d(16)
         self.activation = nn.ReLU()
 
@@ -327,29 +327,27 @@ class Conversion_autoencoder(nn.Module):
         # connect x_1
 
         self.layer1_i = nn.Sequential(
-            nn.ConvTranspose2d(256,256,3,2,1),
+            nn.ConvTranspose2d(256, 256, 3, 2, 1,output_padding=(1)),
             PreActBlock(256, 128, 1),
             PreActBlock(128, 64, 1),
         )
 
         self.layer2_i = nn.Sequential(
-            nn.ConvTranspose2d(128, 128, 3, 2, 1),
+            nn.ConvTranspose2d(128, 128, 3, 2, 1, output_padding=(1)),
             PreActBlock(128, 64, 1),
             PreActBlock(64, 32, 1),
         )
         self.layer3_i = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, 3, 2, 1,output_padding=(1,2)),
+            nn.ConvTranspose2d(64, 64, 3, 2, 1, output_padding=(1)),
             PreActBlock(64, 32, 1),
             PreActBlock(32, 16, 1)
         )
         self.layer4_i = nn.Sequential(
-            nn.ConvTranspose2d(32, 32, (4, 2), 2, 1,output_padding=(2,1)),
+            nn.ConvTranspose2d(32, 32, 3, 2, 1, output_padding=(1)),# 使用output_padding进行填充
             PreActBlock(32, 8, 1),
             PreActBlock(8, 4, 1),
             PreActBlock(4, 1, 1),
         )
-
-
 
     def initialize_params(self):
         for layer in self.modules():
@@ -375,23 +373,33 @@ class Conversion_autoencoder(nn.Module):
                 block(self.in_planes, planes, 1, groups=1, base_width=64, dilation=False, norm_layer=norm_layer))
 
         return nn.Sequential(*layers)
+
     def forward(self, x):
+        # x = x[:, :, :, :704]  # 裁剪到 [batch_size, channels, 64, 704]
+        # x = F.pad(x, (0, 1))  # 在最后一个维度填充一个元素，使其维度为 704
+
         x = self.conv1(x)
         x_1 = self.activation(self.bn1(x))
         x_2 = self.layer1(x_1)
         x_3 = self.layer2(x_2)
         x_4 = self.layer3(x_3)
         x_5 = self.layer4(x_4)
-        y_1 = torch.cat([x_5,x_4],dim=1)
+        y_1 = torch.cat([x_5, x_4], dim=1)
         y_2 = self.layer1_i(y_1)
-        print(y_1.shape)
-        print(y_2.shape)
-        print(x_3.shape)
-        y_2 = torch.cat([y_2,x_3],dim=1)
+        # print(x_3.shape)
+        # print(y_2.shape)
+
+        y_2 = torch.cat([y_2, x_3], dim=1)
         y_3 = self.layer2_i(y_2)
-        y_3 = torch.cat([y_3,x_2],dim=1)
+        # print(x_2.shape)
+        # print(y_3.shape)
+
+        y_3 = torch.cat([y_3, x_2], dim=1)
         y_4 = self.layer3_i(y_3)
-        y_5 = torch.cat([y_4,x_1],dim=1)
+        # print(x_1.shape)
+        # print(y_4.shape)
+
+        y_5 = torch.cat([y_4, x_1], dim=1)
         result = self.layer4_i(y_5)
         return result
 
@@ -404,33 +412,36 @@ class Speaker_classifier(nn.Module):
         self.fc_2 = nn.Linear(128, 64)
         self.bn_2 = nn.BatchNorm1d(64)
         self.fc_3 = nn.Linear(64, nclasses)
+
     def forward(self, x):
         x = F.relu(self.bn_1(self.fc_1(x)))
         x = F.relu(self.bn_2(self.fc_2(x)))
         y = self.fc_3(x)
         return y
 
+
 class VQfeatextract(VQAutoEncoder):
-    def __init__(self, img_size, nf, ch_mult, quantizer="nearest", res_blocks=2, attn_resolutions=[16], codebook_size=1024, emb_dim=256,
-                beta=0.25, gumbel_straight_through=False, gumbel_kl_weight=1e-8, model_path=None,attention_depth=256, nclasses=2,enc_dim=256):
-        super(VQfeatextract, self).__init__(img_size, nf, ch_mult, quantizer, res_blocks, attn_resolutions, codebook_size, emb_dim,
-                beta, gumbel_straight_through, gumbel_kl_weight, model_path)
+    def __init__(self, img_size, nf, ch_mult, quantizer="nearest", res_blocks=2, attn_resolutions=[16],
+                 codebook_size=1024, emb_dim=256,
+                 beta=0.25, gumbel_straight_through=False, gumbel_kl_weight=1e-8, model_path=None, attention_depth=256,
+                 nclasses=2, enc_dim=256):
+        super(VQfeatextract, self).__init__(img_size, nf, ch_mult, quantizer, res_blocks, attn_resolutions,
+                                            codebook_size, emb_dim,
+                                            beta, gumbel_straight_through, gumbel_kl_weight, model_path)
         self.attention = SelfAttention(attention_depth)
         self.activation = nn.ReLU()
         self.bn1 = nn.BatchNorm1d(attention_depth)
         self.fc = nn.Linear(256 * 2, enc_dim)
         self.fc_mu = nn.Linear(enc_dim, nclasses) if nclasses >= 2 else nn.Linear(enc_dim, 1)
 
-
-
     def forward(self, x):
-        print(x.shape)
+        # print(x.shape)
         x = self.encoder(x)
-        print(x.shape)
+        # print(x.shape)
         quant, codebook_loss, quant_stats = self.quantize(x)
-        print(quant.shape)
+        # print(quant.shape)
         x = quant.squeeze(2)
-        print(x.shape)
+        # print(x.shape)
         x = self.attention(x.permute(0, 2, 1).contiguous())
         feat = self.fc(x)
         mu = self.fc_mu(feat)
@@ -443,12 +454,14 @@ if __name__ == '__main__':
     # feat_mat = feature_handle['x']
     # feat_mat = torch.from_numpy(feat_mat)
     # print(feat_mat.shape)
-    with open('D:/Pycharm/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001718LFCC.pkl', 'rb') as feature_handle:
+    with open(
+            'D:/Pycharm/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001718LFCC.pkl',
+            'rb') as feature_handle:
         feat_mat = pickle.load(feature_handle)
 
     feat_mat = torch.from_numpy(feat_mat)
 
-    print(feat_mat.shape)
+    # print(feat_mat.shape)
     feat_mat = dataset.repeat_padding(feat_mat, 704)
 
     # feat_mat.view(1, 60, 231)
@@ -457,19 +470,15 @@ if __name__ == '__main__':
     # feat, mu = model(feat_mat)
     feat_mat = feat_mat.unsqueeze(0).float().unsqueeze(0)
 
-
-
     print(feat_mat.shape)
-    vqmodel = VQAutoEncoder(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
+    vqmodel = VQAutoEncoder(750, 64, [1, 2, 2, 4, 4, 8], 'nearest', 2, [16], 1024)
     x, codebook_loss, quant_stats = vqmodel(feat_mat)
     attention = SelfAttention(256)
 
     ResNet = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
     x, mu = ResNet(feat_mat)
-    VQfeatextract = VQfeatextract(750,64, [1, 2, 2, 4, 4, 8], 'nearest',2, [16], 1024)
-    x,_ = VQfeatextract(feat_mat)
+    VQfeatextract = VQfeatextract(750, 64, [1, 2, 2, 4, 4, 8], 'nearest', 2, [16], 1024)
+    x, _ = VQfeatextract(feat_mat)
     Conversion_autoencoder()
 
-
     print(x.shape)
-
