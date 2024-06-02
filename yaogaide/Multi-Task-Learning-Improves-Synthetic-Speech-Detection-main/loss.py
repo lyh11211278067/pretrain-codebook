@@ -66,3 +66,32 @@ def MSELoss(recons, input, vq_loss,weight=0.5):
     loss = recons_loss + vq_loss * weight
 
     return loss, recons_loss, vq_loss
+
+
+class CodeWeightLoss(nn.Module):
+    def __init__(self, alpha=1.0, pos_weight=1.0, neg_weight=1.0, beta=2.0):
+        super(CodeWeightLoss, self).__init__()
+        self.alpha = alpha
+        self.pos_weight = pos_weight
+        self.neg_weight = neg_weight
+        self.beta = beta
+        self.mse = nn.MSELoss(reduction='none')
+        self.softplus = nn.Softplus()
+
+    def forward(self, pred, gt, labels):
+        # 计算基础 MSE 损失
+        loss = self.mse(pred, gt)
+        loss = loss.view(loss.size(0), -1).mean(dim=1)
+
+        # 创建正样本和负样本的掩码
+        pos_mask = (labels == 1).float()
+        neg_mask = (labels == 0).float()
+
+        # 对正样本加权，以增强其影响
+        weighted_loss = self.beta * self.pos_weight * pos_mask * loss - self.neg_weight * neg_mask * loss
+
+        # 应用 Softplus 函数
+        softplus_loss = self.softplus(self.alpha * weighted_loss)
+
+        # 返回最终的损失值
+        return softplus_loss.mean()

@@ -177,6 +177,7 @@ def train_firststage(args):
     vqvae_model = VQAutoEncoder(704, 32, [1, 2, 2, 4, 8], 'nearest', 2, [16], 1024).to(args.device)
     vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
+    loss = CodeWeightLoss(pos_weight=1.0, neg_weight=1.0, beta=2.0).to(args.device)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
     trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers,
@@ -189,15 +190,15 @@ def train_firststage(args):
         for i, (lfcc, audio_fn, tags, labels, speaker) in enumerate(tqdm(trainDataLoader)):
             lfcc = lfcc.unsqueeze(1).float().to(args.device)
             recons, codebook_loss, _ = vqvae_model(lfcc)
-            total_loss,_,_ = MSELoss(recons, lfcc, codebook_loss, weight=0.5)
-
+            # total_loss,_,_ = MSELoss(recons, lfcc, codebook_loss, weight=0.5)
+            total_loss = loss(recons, lfcc, labels)
 
             vqvae_model_optimizer.zero_grad()
             trainlossDict["vqvae"].append(total_loss.item())
             total_loss.backward()
             vqvae_model_optimizer.step()
 
-            if (i + 1) % 50 == 0:
+            if (i + 1) % 100 == 0:
                 print("[EPOCH: %3d] [TOTAL_LOSS: %.3f]\n" % (epoch_num + 1, total_loss))
         torch.save(vqvae_model, os.path.join(args.trained_model, 'checkpoint/VQvae_model_%d.pt' % (epoch_num + 1)))
 
