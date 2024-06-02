@@ -10,7 +10,6 @@ import random
 import numpy as np
 import dataset
 
-
 class SelfAttention(nn.Module):
     def __init__(self, hidden_size, mean_only=False):
         super(SelfAttention, self).__init__()
@@ -109,13 +108,13 @@ def conv1x1(in_planes, out_planes, stride=1):
 
 
 RESNET_CONFIGS = {
-    'recon': [[1, 1, 1, 1], PreActBlock],
-    '18': [[2, 2, 2, 2], PreActBlock],
-    '28': [[3, 4, 6, 3], PreActBlock],
-    '34': [[3, 4, 6, 3], PreActBlock],
-    '50': [[3, 4, 6, 3], PreActBottleneck],
-    '101': [[3, 4, 23, 3], PreActBottleneck]
-}
+                  'recon': [[1, 1, 1, 1], PreActBlock],
+                  '18': [[2, 2, 2, 2], PreActBlock],
+                  '28': [[3, 4, 6, 3], PreActBlock],
+                  '34': [[3, 4, 6, 3], PreActBlock],
+                  '50': [[3, 4, 6, 3], PreActBottleneck],
+                  '101': [[3, 4, 23, 3], PreActBottleneck]
+                  }
 
 
 def setup_seed(random_seed, cudnn_deterministic=True):
@@ -191,7 +190,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        print(f"Forward input size: {x.size()}")  # 打印输入大小
+
         x = self.conv1(x)
         x = self.activation(self.bn1(x))
         x = self.layer1(x)
@@ -267,6 +266,7 @@ class compress_Block(nn.Module):
         out = self.conv2(F.relu(self.bn2(out)))
         out += shortcut
         return out
+
 
 
 class compress_block(nn.Module):
@@ -433,15 +433,19 @@ class VQfeatextract(VQAutoEncoder):
         self.bn1 = nn.BatchNorm1d(attention_depth)
         self.fc = nn.Linear(256 * 2, enc_dim)
         self.fc_mu = nn.Linear(enc_dim, nclasses) if nclasses >= 2 else nn.Linear(enc_dim, 1)
+        self.conv1 = nn.Conv2d(256,256, kernel_size=3, stride=2, padding=(1, 1), bias=False)
+        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=(1, 1), bias=False)
 
     def forward(self, x):
         # print(x.shape)
         x = self.encoder(x)
         # print(x.shape)
         quant, codebook_loss, quant_stats = self.quantize(x)
-        # print(quant.shape)
-        x = quant.squeeze(2)
-        # print(x.shape)
+        print(quant.shape)
+        x = self.conv1(quant)
+        x = self.conv2(x)
+        x = x.squeeze(2)
+        print(x.shape)
         x = self.attention(x.permute(0, 2, 1).contiguous())
         feat = self.fc(x)
         mu = self.fc_mu(feat)
@@ -454,15 +458,15 @@ if __name__ == '__main__':
     # feat_mat = feature_handle['x']
     # feat_mat = torch.from_numpy(feat_mat)
     # print(feat_mat.shape)
-    with open(
-            'D:/Pycharm/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001718LFCC.pkl',
-            'rb') as feature_handle:
+    with open('/Users/jimmy/Documents/github项目/pretrain-codebook/yaogaide/Multi-Task-Learning-Improves-Synthetic-Speech-Detection-main/train/LA_T_1001114LFCC.pkl', 'rb') as feature_handle:
         feat_mat = pickle.load(feature_handle)
 
     feat_mat = torch.from_numpy(feat_mat)
 
     # print(feat_mat.shape)
     feat_mat = dataset.repeat_padding(feat_mat, 704)
+    pad = (0, 0, 0, 4)
+    feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
 
     # feat_mat.view(1, 60, 231)
 
@@ -470,15 +474,18 @@ if __name__ == '__main__':
     # feat, mu = model(feat_mat)
     feat_mat = feat_mat.unsqueeze(0).float().unsqueeze(0)
 
+
+
     print(feat_mat.shape)
-    vqmodel = VQAutoEncoder(750, 64, [1, 2, 2, 4, 4, 8], 'nearest', 2, [16], 1024)
+    vqmodel = VQAutoEncoder(750,32, [1, 2, 2, 4, 8], 'nearest',2, [16], 1024)
     x, codebook_loss, quant_stats = vqmodel(feat_mat)
-    attention = SelfAttention(256)
 
     ResNet = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
     x, mu = ResNet(feat_mat)
-    VQfeatextract = VQfeatextract(750, 64, [1, 2, 2, 4, 4, 8], 'nearest', 2, [16], 1024)
-    x, _ = VQfeatextract(feat_mat)
-    Conversion_autoencoder()
+    VQfeatextract = VQfeatextract(750,32, [1, 2, 2, 4 ,8], 'nearest',2, [16], 1024)
+    x,_ = VQfeatextract(feat_mat)
+
+
 
     print(x.shape)
+

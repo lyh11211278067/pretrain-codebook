@@ -50,6 +50,7 @@ def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
             for j in range(labels.size(0)):
                 cm_score_file.write(
                     '%s A%02d %s %s\n' % (audio_fn[j], tags[j].data,
+                                          
                                           "spoof" if labels[j].data.cpu().numpy() else "bonafide",
                                           score[j].item()))
 

@@ -174,7 +174,7 @@ def adjust_learning_rate(args, optimizer, epoch_num):
 
 
 def train_firststage(args):
-    vqvae_model = VQAutoEncoder(704, 64, [1, 2, 2, 4, 4, 8, 16], 'nearest', 2, [16], 1024).to(args.device)
+    vqvae_model = VQAutoEncoder(704, 32, [1, 2, 2, 4, 8], 'nearest', 2, [16], 1024).to(args.device)
     vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
@@ -230,7 +230,7 @@ def train(args):
     else:
         print("No model files found.")
 
-    lfcc_model = VQfeatextract(704, 64, [1, 2, 2, 4, 4, 8, 16], 'nearest', 2, [16], 1024,
+    lfcc_model = VQfeatextract(704, 32, [1, 2, 2, 4, 8], 'nearest', 2, [16], 1024,
                                model_path=latest_model_file).to(args.device)
 
     for paramiters in lfcc_model.quantize.parameters():
