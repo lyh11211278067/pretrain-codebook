@@ -196,6 +196,7 @@ def train_firststage(args):
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
+    training_set = torch.utils.data.Subset(training_set, range(2544))
     trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
     loss = CodeWeightLoss(pos_weight=1.0, neg_weight=1.0, beta=2.0).to(args.device)
@@ -291,8 +292,10 @@ def train(args):
                                                 betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
+    training_set = torch.utils.data.Subset(training_set, range(2544))
     validation_set = ASVspoof2019(args.access_type, args.path_to_features, args.path_to_protocol, 'dev',
                                   'LFCC', feat_len=args.feat_len, padding=args.padding)
+    validation_set = torch.utils.data.Subset(validation_set, range(2544))
     trainDataLoader = DataLoader(training_set, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
     valDataLoader = DataLoader(validation_set, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
