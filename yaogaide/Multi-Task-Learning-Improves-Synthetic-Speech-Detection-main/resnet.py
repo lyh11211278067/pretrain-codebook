@@ -210,7 +210,7 @@ class Reconstruction_autoencoder(nn.Module):
     def __init__(self, enc_dim, resnet_type='18', nclasses=2):
         super(Reconstruction_autoencoder, self).__init__()
 
-        self.fc = nn.Linear(enc_dim, 4 * 8 * 88)
+        self.fc = nn.Linear(enc_dim, 4 * 10 * 120)
         self.bn1 = nn.BatchNorm2d(4)
         self.activation = nn.ReLU()
 
@@ -234,11 +234,11 @@ class Reconstruction_autoencoder(nn.Module):
         )
 
     def forward(self, z):
-        z = self.fc(z).view((z.shape[0], 4, 8, 88))
+        z = self.fc(z).view((z.shape[0], 4, 10, 120))
         z = self.activation(self.bn1(z))
         z = self.layer1(z)
         z = self.layer2(z)
-        z = nn.functional.interpolate(z, scale_factor=4, mode="bilinear", align_corners=True)
+        z = nn.functional.interpolate(z, scale_factor=3, mode="bilinear", align_corners=True)
         z = self.layer3(z)
         z = nn.functional.interpolate(z, scale_factor=2, mode="bilinear", align_corners=True)
         z = self.layer4(z)
@@ -300,13 +300,13 @@ class Conversion_autoencoder(nn.Module):
 
         self._norm_layer = nn.BatchNorm2d
 
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=(9, 3), stride=(3, 2), padding=(1, 1), bias=False)
         self.bn1 = nn.BatchNorm2d(16)
         self.activation = nn.ReLU()
 
         self.layer1 = nn.Sequential(
             compress_block(16, 16, 1),
-            compress_block(16, 32, 2),
+            compress_block(16, 32, (2,3)),
         )
 
         self.layer2 = nn.Sequential(
@@ -327,27 +327,29 @@ class Conversion_autoencoder(nn.Module):
         # connect x_1
 
         self.layer1_i = nn.Sequential(
-            nn.ConvTranspose2d(256, 256, 3, 2, 1,output_padding=(1)),
+            nn.ConvTranspose2d(256,256,3,2,1, output_padding=(0,1)),
             PreActBlock(256, 128, 1),
             PreActBlock(128, 64, 1),
         )
 
         self.layer2_i = nn.Sequential(
-            nn.ConvTranspose2d(128, 128, 3, 2, 1, output_padding=(1)),
+            nn.ConvTranspose2d(128, 128, 3, 2, 1, output_padding=(0,1)),
             PreActBlock(128, 64, 1),
             PreActBlock(64, 32, 1),
         )
         self.layer3_i = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, 3, 2, 1, output_padding=(1)),
+            nn.ConvTranspose2d(64, 64, 3, (2,3), 1,output_padding=(1,2)),
             PreActBlock(64, 32, 1),
             PreActBlock(32, 16, 1)
         )
         self.layer4_i = nn.Sequential(
-            nn.ConvTranspose2d(32, 32, 3, 2, 1, output_padding=(1)),# 使用output_padding进行填充
+            nn.ConvTranspose2d(32, 32, (9, 3), (3, 2), 1,output_padding=(2,1)),
             PreActBlock(32, 8, 1),
             PreActBlock(8, 4, 1),
             PreActBlock(4, 1, 1),
         )
+
+
 
     def initialize_params(self):
         for layer in self.modules():
@@ -373,33 +375,20 @@ class Conversion_autoencoder(nn.Module):
                 block(self.in_planes, planes, 1, groups=1, base_width=64, dilation=False, norm_layer=norm_layer))
 
         return nn.Sequential(*layers)
-
     def forward(self, x):
-        # x = x[:, :, :, :704]  # 裁剪到 [batch_size, channels, 64, 704]
-        # x = F.pad(x, (0, 1))  # 在最后一个维度填充一个元素，使其维度为 704
-
         x = self.conv1(x)
         x_1 = self.activation(self.bn1(x))
         x_2 = self.layer1(x_1)
         x_3 = self.layer2(x_2)
         x_4 = self.layer3(x_3)
         x_5 = self.layer4(x_4)
-        y_1 = torch.cat([x_5, x_4], dim=1)
+        y_1 = torch.cat([x_5,x_4],dim=1)
         y_2 = self.layer1_i(y_1)
-        # print(x_3.shape)
-        # print(y_2.shape)
-
-        y_2 = torch.cat([y_2, x_3], dim=1)
+        y_2 = torch.cat([y_2,x_3],dim=1)
         y_3 = self.layer2_i(y_2)
-        # print(x_2.shape)
-        # print(y_3.shape)
-
-        y_3 = torch.cat([y_3, x_2], dim=1)
+        y_3 = torch.cat([y_3,x_2],dim=1)
         y_4 = self.layer3_i(y_3)
-        # print(x_1.shape)
-        # print(y_4.shape)
-
-        y_5 = torch.cat([y_4, x_1], dim=1)
+        y_5 = torch.cat([y_4,x_1],dim=1)
         result = self.layer4_i(y_5)
         return result
 
@@ -433,8 +422,9 @@ class VQfeatextract(VQAutoEncoder):
         self.bn1 = nn.BatchNorm1d(attention_depth)
         self.fc = nn.Linear(256 * 2, enc_dim)
         self.fc_mu = nn.Linear(enc_dim, nclasses) if nclasses >= 2 else nn.Linear(enc_dim, 1)
-        self.conv1 = nn.Conv2d(256,256, kernel_size=3, stride=2, padding=(1, 1), bias=False)
-        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=(1, 1), bias=False)
+        self.conv1 = nn.Conv2d(256,256, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv3 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1, bias=False)
 
     def forward(self, x):
         # print(x.shape)
@@ -444,6 +434,7 @@ class VQfeatextract(VQAutoEncoder):
         print(quant.shape)
         x = self.conv1(quant)
         x = self.conv2(x)
+        x = self.conv3(x)
         x = x.squeeze(2)
         print(x.shape)
         x = self.attention(x.permute(0, 2, 1).contiguous())
@@ -464,9 +455,9 @@ if __name__ == '__main__':
     feat_mat = torch.from_numpy(feat_mat)
 
     # print(feat_mat.shape)
-    feat_mat = dataset.repeat_padding(feat_mat, 704)
-    pad = (0, 0, 0, 4)
-    feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
+    feat_mat = dataset.repeat_padding(feat_mat, 720)
+    # pad = (0, 0, 0, 4)
+    # feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
 
     # feat_mat.view(1, 60, 231)
 
@@ -477,15 +468,21 @@ if __name__ == '__main__':
 
 
     print(feat_mat.shape)
-    vqmodel = VQAutoEncoder(750,32, [1, 2, 2, 4, 8], 'nearest',2, [16], 1024)
-    x, codebook_loss, quant_stats = vqmodel(feat_mat)
-
-    ResNet = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
-    x, mu = ResNet(feat_mat)
-    VQfeatextract = VQfeatextract(750,32, [1, 2, 2, 4 ,8], 'nearest',2, [16], 1024)
+    # vqmodel = VQAutoEncoder(720,32, [1, 2, 4, 8], 'nearest',2, [120], 1024)
+    # x, codebook_loss, quant_stats = vqmodel(feat_mat)
+    # print(x.shape)
+    #
+    # # ResNet = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
+    #
+    VQfeatextract = VQfeatextract(720,32, [1, 2, 4 ,8], 'nearest',2, [120], 1024)
     x,_ = VQfeatextract(feat_mat)
-
-
-
     print(x.shape)
+    #
+    # model = Conversion_autoencoder(3, 256, nclasses=2)
+    # result = model(feat_mat)
+    model = Reconstruction_autoencoder(256)
+    result = model(x)
+    print(result.shape)
+
+
 

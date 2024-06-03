@@ -58,8 +58,8 @@ class ASVspoof2019(Dataset):
                 feat_mat = pickle.load(feature_handle)
 
         feat_mat = torch.from_numpy(feat_mat)
-        pad = (0, 0, 0, self.feat_depth - feat_mat.shape[0])
-        feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
+        # pad = (0, 0, 0, self.feat_depth - feat_mat.shape[0])
+        # feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
         this_feat_len = feat_mat.shape[1]
         if this_feat_len > self.feat_len:
             startp = np.random.randint(this_feat_len-self.feat_len)

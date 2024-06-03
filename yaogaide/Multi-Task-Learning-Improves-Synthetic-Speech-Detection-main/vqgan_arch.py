@@ -115,24 +115,25 @@ class GumbelQuantizer(nn.Module):
 
 
 class Downsample(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, scale_factor=2):
         super().__init__()
-        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride = scale_factor, padding=0)
 
     def forward(self, x):
         pad = (0, 1, 0, 1)
-        x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
+        x = torch.nn.functional.pad(x, pad, mode="constant", value=1)
         x = self.conv(x)
         return x
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, scale_factor=2):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+        self.scale_factor = scale_factor
 
     def forward(self, x):
-        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        x = F.interpolate(x, scale_factor=self.scale_factor, mode="nearest")
         x = self.conv(x)
 
         return x
@@ -252,9 +253,14 @@ class Encoder(nn.Module):
                 if curr_res in attn_resolutions:
                     blocks.append(AttnBlock(block_in_ch))
 
-            if i != self.num_resolutions - 1:
-                blocks.append(Downsample(block_in_ch))
-                curr_res = curr_res // 2
+            if i != 0:
+                if i == 1:
+                    scale_factor = 3
+                else:
+                    scale_factor = 2
+                blocks.append(Downsample(block_in_ch,scale_factor=scale_factor))
+                curr_res = curr_res // scale_factor
+            print(curr_res)
 
         # non-local attention block
         blocks.append(ResBlock(block_in_ch, block_in_ch))
@@ -285,7 +291,7 @@ class Generator(nn.Module):
         self.in_channels = emb_dim
         self.out_channels = 1
         block_in_ch = self.nf * self.ch_mult[-1]
-        curr_res = self.resolution // 2 ** (self.num_resolutions-1)
+        curr_res = self.resolution // 24
 
         blocks = []
         # initial conv
@@ -307,8 +313,13 @@ class Generator(nn.Module):
                     blocks.append(AttnBlock(block_in_ch))
 
             if i != 0:
-                blocks.append(Upsample(block_in_ch))
-                curr_res = curr_res * 2
+                if i == 1:
+                    scale_factor = 3
+                else:
+                    scale_factor = 2
+                blocks.append(Upsample(block_in_ch, scale_factor=scale_factor))
+                curr_res = curr_res * scale_factor
+                print(curr_res)
 
         blocks.append(normalize(block_in_ch))
         blocks.append(nn.Conv2d(block_in_ch, self.out_channels, kernel_size=3, stride=1, padding=1))

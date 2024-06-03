@@ -50,3 +50,4 @@ criterion = CustomLoss(alpha=20.0, pos_weight=1.0, neg_weight=1.0, beta=2.0)
 # 计算自定义损失
 loss = criterion(pred, target, labels)
 print('Custom Loss:', loss.item())
+

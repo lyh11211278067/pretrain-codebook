@@ -47,7 +47,7 @@ def initParams():
     # 用于指定特征的长度
     # 用于指定如何处理较短的语音片段的填充
     # 用于指定编码的维度
-    parser.add_argument("--feat_len", type=int, help="features length", default=704)
+    parser.add_argument("--feat_len", type=int, help="features length", default=720)
     parser.add_argument('--padding', type=str, default='repeat', choices=['zero', 'repeat'],
                         help="how to pad short utterance")
     parser.add_argument("--enc_dim", type=int, help="encoding dimension", default=256)
@@ -191,7 +191,7 @@ def train_firststage(args):
     # 初始化TensorBoard的SummaryWriter
     writer = SummaryWriter(log_dir="/root/tf-logs")
 
-    vqvae_model = VQAutoEncoder(704, 32, [1, 2, 2, 4, 8], 'nearest', 2, [16], 1024).to(args.device)
+    vqvae_model = VQAutoEncoder(720, 32, [1, 2, 4, 8], 'nearest', 2, [120], 1024).to(args.device)
     vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
@@ -255,7 +255,7 @@ def train(args):
     else:
         print("No model files found.")
 
-    lfcc_model = VQfeatextract(704, 32, [1, 2, 2, 4, 8], 'nearest', 2, [16], 1024,
+    lfcc_model = VQfeatextract(720, 32, [1, 2, 4, 8], 'nearest', 2, [120], 1024,
                                model_path=latest_model_file).to(args.device)
 
     for paramiters in lfcc_model.quantize.parameters():
