@@ -15,6 +15,8 @@ import eval_metrics as em
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
 
 
 # torch.set_default_tensor_type(torch.FloatTensor)
@@ -29,12 +31,17 @@ def initParams():
 
     # 用于指定特征的路径、指定协议文件的路径、指定输出文件夹的路径.
     parser.add_argument("-f", "--path_to_features", type=str, help="features path",
-                        default='D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/')
+                        default='/root/autodl-tmp/ASVspoof2019LAFeatures/')
     parser.add_argument("-p", "--path_to_protocol", type=str, help="protocol path",
-                        default='D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_cm_protocols/')
+                        default='/root/autodl-tmp/LA/ASVspoof2019_LA_cm_protocols/')
+
+    # stage1 模型的output
+    parser.add_argument("-o1", "--out_fold1", type=str, help="output folder",
+                        default='/root/autodl-tmp/output/checkpoint/')
+
     # stage2 模型的output
     parser.add_argument("-o", "--out_fold", type=str, help="output folder",
-                        default='D:/Pycharm/pretrain-codebook/output/test_model/')
+                        default='/root/autodl-tmp/output/test_model/')
 
     # Dataset prepare
     # 用于指定特征的长度
@@ -47,11 +54,11 @@ def initParams():
 
     # Training hyper parameters 训练超参数
     # 用于指定训练的轮数
-    parser.add_argument('--num_epochs', type=int, default=50, help="Number of epochs for training")
+    parser.add_argument('--num_epochs', type=int, default=100, help="Number of epochs for training")
     parser.add_argument('--num_epochs_stage2', type=int, default=100, help="Number of epochs for training")
     # 修改batch数量
-    parser.add_argument('--batch_size', type=int, default=4, help="Mini batch size for training")
-    parser.add_argument('--batch_size_stage2', type=int, default=4, help="Mini batch size for training")
+    parser.add_argument('--batch_size', type=int, default=32, help="Mini batch size for training")
+    parser.add_argument('--batch_size_stage2', type=int, default=32, help="Mini batch size for training")
 
     # 学习率（learning rate）,用于控制训练过程中参数更新的步长
     # 学习率衰减的比例,用于在训练过程中逐步减小学习率
@@ -91,10 +98,10 @@ def initParams():
 
     # 这个是第一个stage训练完的vqvae模型
     parser.add_argument('--trained_model', type=str, help="trained vqvae model",
-                        default='D:/Pycharm/pretrain-codebook/output/')
+                        default='/root/output')
     # 要载入的模型地址
     parser.add_argument('--load_training', type=str, help="location of trained vqvae model",
-                        default='D:/Pycharm/pretrain-codebook/output/checkpoint/VQvae_model_50.pt')
+                        default='/root/output/checkpoint/VQvae_model_100.pt')
 
     # 1使用真实语音重建来辅助训练。2使用伪造语音转换来辅助训练。3使用说话人分类来辅助训练。
     parser.add_argument('--S1', action='store_true', help="Assist by bonafide speech reconstruction.")
@@ -149,14 +156,21 @@ def initParams():
     # assert os.path.exists(args.path_to_database)
     assert os.path.exists(args.path_to_features)
 
-    # Save training arguments
-    with open(os.path.join(args.out_fold, 'args.json'), 'w') as file:
-        file.write(json.dumps(vars(args), sort_keys=True, separators=('\n', ':')))
+    # Save training arguments stage1
+    # with open(os.path.join(args.out_fold1, 'args.json'), 'w') as file:
+    #     file.write(json.dumps(vars(args), sort_keys=True, separators=('\n', ':')))
+    # with open(os.path.join(args.out_fold1, 'train_loss.log'), 'w') as file:
+    #     file.write("Start recording training loss ...\n")
+    # with open(os.path.join(args.out_fold1, 'dev_loss.log'), 'w') as file:
+    #     file.write("Start recording validation loss ...\n")
 
-    with open(os.path.join(args.out_fold, 'train_loss.log'), 'w') as file:
-        file.write("Start recording training loss ...\n")
-    with open(os.path.join(args.out_fold, 'dev_loss.log'), 'w') as file:
-        file.write("Start recording validation loss ...\n")
+    # Save training arguments stage2
+    # with open(os.path.join(args.out_fold, 'args.json'), 'w') as file:
+    #     file.write(json.dumps(vars(args), sort_keys=True, separators=('\n', ':')))
+    # with open(os.path.join(args.out_fold, 'train_loss.log'), 'w') as file:
+    #     file.write("Start recording training loss ...\n")
+    # with open(os.path.join(args.out_fold, 'dev_loss.log'), 'w') as file:
+    #     file.write("Start recording validation loss ...\n")
 
     args.cuda = torch.cuda.is_available()
     print('Cuda device available: ', args.cuda)
@@ -174,14 +188,17 @@ def adjust_learning_rate(args, optimizer, epoch_num):
 
 
 def train_firststage(args):
+    # 初始化TensorBoard的SummaryWriter
+    writer = SummaryWriter(log_dir="/root/tf-logs")
+
     vqvae_model = VQAutoEncoder(704, 32, [1, 2, 2, 4, 8], 'nearest', 2, [16], 1024).to(args.device)
     vqvae_model_optimizer = torch.optim.Adam(vqvae_model.parameters(), lr=args.lr,
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
-    loss = CodeWeightLoss(pos_weight=1.0, neg_weight=1.0, beta=2.0).to(args.device)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
     trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
+    loss = CodeWeightLoss(pos_weight=1.0, neg_weight=1.0, beta=2.0).to(args.device)
     for epoch_num in tqdm(range(args.num_epochs)):
         vqvae_model.train()
         trainlossDict = defaultdict(list)
@@ -189,9 +206,11 @@ def train_firststage(args):
         print('\nEpoch: %d ' % (epoch_num + 1))
         for i, (lfcc, audio_fn, tags, labels, speaker) in enumerate(tqdm(trainDataLoader)):
             lfcc = lfcc.unsqueeze(1).float().to(args.device)
+            labels = labels.to(args.device)
             recons, codebook_loss, _ = vqvae_model(lfcc)
             # total_loss,_,_ = MSELoss(recons, lfcc, codebook_loss, weight=0.5)
             total_loss = loss(recons, lfcc, labels)
+
 
             vqvae_model_optimizer.zero_grad()
             trainlossDict["vqvae"].append(total_loss.item())
@@ -202,7 +221,9 @@ def train_firststage(args):
                 print("[EPOCH: %3d] [TOTAL_LOSS: %.3f]\n" % (epoch_num + 1, total_loss))
         torch.save(vqvae_model, os.path.join(args.trained_model, 'checkpoint/VQvae_model_%d.pt' % (epoch_num + 1)))
 
-        with open(os.path.join(args.out_fold, "checkpoint/train_loss.log"), "a") as log:
+        writer.add_scalar('Loss/train', np.nanmean(trainlossDict["vqvae"]), epoch_num)
+
+        with open(os.path.join(args.out_fold1, "train_loss.log"), "a") as log:
             log.write(
                 str(epoch_num) + "\t" + str(np.nanmean(trainlossDict["vqvae"])) +"\n")
 
@@ -211,6 +232,9 @@ def train_firststage(args):
 
 def train(args):
     torch.set_default_tensor_type(torch.FloatTensor)
+
+    # 初始化TensorBoard的SummaryWriter
+    writer = SummaryWriter(log_dir="/root/tf-logs")
 
     # id = [0,1]
     id = [0]
@@ -317,7 +341,7 @@ def train(args):
                 classifier_optimizer.zero_grad()
 
                 # 前向传播之前检查feature_select的大小，如果发现批处理大小为1，则跳过这个批次的训练。
-                print(feature_select.shape)
+                # print(feature_select.shape)
                 if feature_select.size(0) > 1:
                     classify_result = norm_classifier(feature_select)
                     loss_speaker_norm = criterion(classify_result, label_select_for_classify)
@@ -352,9 +376,9 @@ def train(args):
                 if lfcc_.size(0) == 1:  # 当批次大小为1时特别处理
                     # 进行适当的调整或计算
                     continue  # 或者跳过此批次
-                print()
-                print(lfcc_.shape)
-                print(lfcc_re.shape)
+                # print()
+                # print(lfcc_.shape)
+                # print(lfcc_re.shape)
 
                 loss2 = reconstruction_loss(lfcc_, lfcc_re) / len(index) * len(lfcc) * args.lambda_r
 
@@ -416,6 +440,8 @@ def train(args):
                 lfcc_optimizer.step()
                 amsoftmax_optimzer.step()
 
+
+
             if args.S3:
                 classifier_optimizer.step()
             if args.S2:
@@ -448,7 +474,7 @@ def train(args):
                    os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_lfcc_model_%d.pt' % (epoch_num + 1)))
         # 如果不使用S2模块，以下保存CA模型的代码应该被注释掉或删除
         torch.save(CA, os.path.join(args.out_fold, 'checkpoint', 'anti-spoofing_CA_%d.pt' % (epoch_num + 1)))
-
+        writer.add_scalar(f'Loss/train/{args.add_loss}', np.nanmean(trainlossDict[monitor_loss]), epoch_num )
         # Val the model
         lfcc_model.eval()
         with torch.no_grad():
@@ -480,6 +506,8 @@ def train(args):
             val_eer = em.compute_eer(scores[labels == 0], scores[labels == 1])[0]
             other_val_eer = em.compute_eer(-scores[labels == 0], -scores[labels == 1])[0]
             val_eer = min(val_eer, other_val_eer)
+            writer.add_scalar(f'Loss/val/{args.add_loss}', np.nanmean(devlossDict[monitor_loss]), epoch_num)
+            writer.add_scalar('EER/val', val_eer, epoch_num)
 
             with open(os.path.join(args.out_fold, "dev_loss.log"), "a") as log:
                 log.write(
@@ -524,16 +552,18 @@ def train(args):
             with open(os.path.join(args.out_fold, 'args.json'), 'a') as res_file:
                 res_file.write('\nTrained Epochs: %d\n' % (epoch_num - 19))
             break
+    # 关闭TensorBoard的SummaryWriter
+    writer.close()
 
     return lfcc_model, loss_model
 
 
 if __name__ == "__main__":
     print(torch.cuda.is_available())
-    args = initParams()
-    # _ = train_firststage(args)
+    args= initParams()
+    _ = train_firststage(args)
 
-    # _, _ = train(args)
+    _, _ = train(args)
     # model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_lfcc_model.pt'))
     # if args.add_loss == "softmax":
     #     loss_model = None

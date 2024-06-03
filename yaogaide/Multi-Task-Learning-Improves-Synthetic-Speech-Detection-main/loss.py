@@ -69,7 +69,7 @@ def MSELoss(recons, input, vq_loss,weight=0.5):
 
 
 class CodeWeightLoss(nn.Module):
-    def __init__(self, alpha=1.0, pos_weight=1.0, neg_weight=1.0, beta=2.0):
+    def __init__(self, alpha=1.0, pos_weight=1.0, neg_weight=1.0, beta=1.0):
         super(CodeWeightLoss, self).__init__()
         self.alpha = alpha
         self.pos_weight = pos_weight

@@ -10,6 +10,7 @@ from tqdm import tqdm
 import eval_metrics as em
 import numpy as np
 
+
 def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
     dirname = os.path.dirname
     basename = os.path.splitext(os.path.basename(feat_model_path))[0]
@@ -21,11 +22,11 @@ def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
     # print(list(range(torch.cuda.device_count())))
     # model = nn.DataParallel(model, list(range(torch.cuda.device_count()))) # for multiple GPUs
     model = model.to(device)
-    loss_model = torch.load(loss_model_path,map_location=device) if add_loss != "softmax" else None
+    loss_model = torch.load(loss_model_path, map_location=device) if add_loss != "softmax" else None
     # if add_loss != "softmax":
     #     loss_model = nn.DataParallel(loss_model, list(range(torch.cuda.device_count())))
     test_set = ASVspoof2019("LA", file,
-                            "D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_cm_protocols/", part,
+                            "/root/autodl-tmp/LA/ASVspoof2019_LA_cm_protocols/", part,
                             "LFCC", feat_len=704, padding="repeat")
     testDataLoader = DataLoader(test_set, batch_size=4, shuffle=False, drop_last=True, num_workers=3,
                                 collate_fn=test_set.collate_fn)
@@ -50,21 +51,18 @@ def test_model(feat_model_path, loss_model_path, part, add_loss, device, file):
             for j in range(labels.size(0)):
                 cm_score_file.write(
                     '%s A%02d %s %s\n' % (audio_fn[j], tags[j].data,
-                                          
                                           "spoof" if labels[j].data.cpu().numpy() else "bonafide",
                                           score[j].item()))
 
     eer_cm, min_tDCF = compute_eer_and_tdcf(os.path.join(dir_path, 'checkpoint_cm_score.txt'),
-                                            "D:/Pycharm/pretrain-codebook/")
-                                            
-    with open("result.txt","a") as result_file:
-        result_file.write("\n"+feat_model_path+"\n")
-        result_file.write(str(eer_cm*100)+"       "+str(min_tDCF)+"\n")
+                                            "/root/autodl-tmp/")
 
-        
-    
-        
+    with open("result.txt", "a") as result_file:
+        result_file.write("\n" + feat_model_path + "\n")
+        result_file.write(str(eer_cm * 100) + "       " + str(min_tDCF) + "\n")
+
     return eer_cm, min_tDCF
+
 
 def test(model_dir, add_loss, device, file):
     model_path = os.path.join(model_dir, "anti-spoofing_lfcc_model.pt")
@@ -73,9 +71,11 @@ def test(model_dir, add_loss, device, file):
     print(eer_cm)
     print(min_tDCF)
 
+
 def test_individual_attacks(cm_score_file):
-    asv_score_file = os.path.join('D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt')
-    # asv_score_file = 'D:/Pycharm/pretrain-codebook/LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt'
+    asv_score_file = os.path.join(
+        '/root/autodl-tmp/LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt')
+    # asv_score_file = '/root/autodl-tmp/LA/ASVspoof2019_LA_asv_scores/ASVspoof2019.LA.asv.eval.gi.trl.scores.txt'
 
     # Fix tandem detection cost function (t-DCF) parameters
     Pspoof = 0.05
@@ -105,7 +105,7 @@ def test_individual_attacks(cm_score_file):
     other_cm_scores = -cm_scores
 
     eer_cm_lst, min_tDCF_lst = [], []
-    for attack_idx in range(7,20):
+    for attack_idx in range(7, 20):
         # Extract target, nontarget, and spoof scores from the ASV scores
         tar_asv = asv_scores[asv_keys == 'target']
         non_asv = asv_scores[asv_keys == 'nontarget']
@@ -119,13 +119,15 @@ def test_individual_attacks(cm_score_file):
         eer_asv, asv_threshold = em.compute_eer(tar_asv, non_asv)
         eer_cm = em.compute_eer(bona_cm, spoof_cm)[0]
 
-        other_eer_cm = em.compute_eer(other_cm_scores[cm_keys == 'bonafide'], other_cm_scores[cm_sources == 'A%02d' % attack_idx])[0]
+        other_eer_cm = \
+        em.compute_eer(other_cm_scores[cm_keys == 'bonafide'], other_cm_scores[cm_sources == 'A%02d' % attack_idx])[0]
 
         [Pfa_asv, Pmiss_asv, Pmiss_spoof_asv] = em.obtain_asv_error_rates(tar_asv, non_asv, spoof_asv, asv_threshold)
 
         if eer_cm < other_eer_cm:
             # Compute t-DCF
-            tDCF_curve, CM_thresholds = em.compute_tDCF(bona_cm, spoof_cm, Pfa_asv, Pmiss_asv, Pmiss_spoof_asv, cost_model,
+            tDCF_curve, CM_thresholds = em.compute_tDCF(bona_cm, spoof_cm, Pfa_asv, Pmiss_asv, Pmiss_spoof_asv,
+                                                        cost_model,
                                                         True)
             # Minimum t-DCF
             min_tDCF_index = np.argmin(tDCF_curve)
@@ -146,11 +148,13 @@ def test_individual_attacks(cm_score_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('-m', '--model_dir', type=str, help="path to the trained model", default="D:/Pycharm/pretrain-codebook/output/test_model/")
+    parser.add_argument('-m', '--model_dir', type=str, help="path to the trained model",
+                        default="/root/autodl-tmp/output/test_model/")
     parser.add_argument('-l', '--loss', type=str, default="ocsoftmax",
                         choices=["softmax", 'amsoftmax', 'ocsoftmax'], help="loss function")
     parser.add_argument("--gpu", type=str, help="GPU index", default="0")
-    parser.add_argument('-f', "--path_to_features", type=str, help="path to the feature file", default="D:/Pycharm/pretrain-codebook/ASVspoof2019LAFeatures/")
+    parser.add_argument('-f', "--path_to_features", type=str, help="path to the feature file",
+                        default="/root/autodl-tmp/ASVspoof2019LAFeatures/")
     args = parser.parse_args()
     args.device = torch.device("cuda:{:d}".format(int(args.gpu)) if torch.cuda.is_available() else "cpu")
     test(args.model_dir, args.loss, args.device, args.path_to_features)
