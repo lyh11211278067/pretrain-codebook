@@ -456,6 +456,7 @@ if __name__ == '__main__':
 
     # print(feat_mat.shape)
     feat_mat = dataset.repeat_padding(feat_mat, 720)
+
     # pad = (0, 0, 0, 4)
     # feat_mat = torch.nn.functional.pad(feat_mat, pad, mode="constant", value=1)
 
@@ -464,7 +465,7 @@ if __name__ == '__main__':
     # model = ResNet(3, 256, resnet_type='34', nclasses=2, dropout1d=True, dropout2d=True, p=0.01)
     # feat, mu = model(feat_mat)
     feat_mat = feat_mat.unsqueeze(0).float().unsqueeze(0)
-
+    feat_mat = torch.cat([feat_mat, feat_mat, feat_mat], dim=0)
 
 
     print(feat_mat.shape)
@@ -477,6 +478,10 @@ if __name__ == '__main__':
     VQfeatextract = VQfeatextract(720,32, [1, 2, 4 ,8], 'nearest',2, [120], 1024)
     x,_ = VQfeatextract(feat_mat)
     print(x.shape)
+
+    Speaker_classifier = Speaker_classifier(256, 20)
+    result = Speaker_classifier(x)
+    print(result.shape)
     #
     # model = Conversion_autoencoder(3, 256, nclasses=2)
     # result = model(feat_mat)

@@ -57,8 +57,8 @@ def initParams():
     parser.add_argument('--num_epochs', type=int, default=100, help="Number of epochs for training")
     parser.add_argument('--num_epochs_stage2', type=int, default=100, help="Number of epochs for training")
     # 修改batch数量
-    parser.add_argument('--batch_size', type=int, default=32, help="Mini batch size for training")
-    parser.add_argument('--batch_size_stage2', type=int, default=32, help="Mini batch size for training")
+    parser.add_argument('--batch_size', type=int, default=16, help="Mini batch size for training")
+    parser.add_argument('--batch_size_stage2', type=int, default=16, help="Mini batch size for training")
 
     # 学习率（learning rate）,用于控制训练过程中参数更新的步长
     # 学习率衰减的比例,用于在训练过程中逐步减小学习率
@@ -196,10 +196,10 @@ def train_firststage(args):
                                              betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
-    training_set = torch.utils.data.Subset(training_set, range(2544))
-    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers,
+    training_subset = torch.utils.data.Subset(training_set, range(2544))
+    trainDataLoader = DataLoader(training_subset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
-    loss = CodeWeightLoss(pos_weight=1.0, neg_weight=1.0, beta=2.0).to(args.device)
+    loss = CodeWeightLoss(pos_weight=1.0, neg_weight=1.0, beta=1.0).to(args.device)
     for epoch_num in tqdm(range(args.num_epochs)):
         vqvae_model.train()
         trainlossDict = defaultdict(list)
@@ -292,13 +292,13 @@ def train(args):
                                                 betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005)
     training_set = ASVspoof2019_multi_speaker(args.access_type, args.path_to_features, args.path_to_protocol, 'train',
                                               'LFCC', feat_len=args.feat_len, padding=args.padding)
-    training_set = torch.utils.data.Subset(training_set, range(2544))
+    training_subset = torch.utils.data.Subset(training_set, range(2544))
     validation_set = ASVspoof2019(args.access_type, args.path_to_features, args.path_to_protocol, 'dev',
                                   'LFCC', feat_len=args.feat_len, padding=args.padding)
-    validation_set = torch.utils.data.Subset(validation_set, range(2544))
-    trainDataLoader = DataLoader(training_set, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
+    validation_subset = torch.utils.data.Subset(validation_set, range(2544))
+    trainDataLoader = DataLoader(training_subset, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                  collate_fn=training_set.collate_fn)
-    valDataLoader = DataLoader(validation_set, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
+    valDataLoader = DataLoader(validation_subset, batch_size=args.batch_size_stage2, shuffle=True, drop_last=True, num_workers=args.num_workers,
                                collate_fn=validation_set.collate_fn)
 
     # feat, _, _, _ = training_set[29]
@@ -343,15 +343,10 @@ def train(args):
                 label_select_for_classify = speaker.index_select(0, index)
                 classifier_optimizer.zero_grad()
 
-                # 前向传播之前检查feature_select的大小，如果发现批处理大小为1，则跳过这个批次的训练。
-                # print(feature_select.shape)
-                if feature_select.size(0) > 1:
-                    classify_result = norm_classifier(feature_select)
-                    loss_speaker_norm = criterion(classify_result, label_select_for_classify)
-                    # print(label_select_for_classify)
-                    loss_speaker_norm = loss_speaker_norm * args.lambda_m
-                else:
-                    continue # 跳过这个批次
+                classify_result = norm_classifier(feature_select)
+                loss_speaker_norm = criterion(classify_result, label_select_for_classify)
+                # print(label_select_for_classify)
+                loss_speaker_norm = loss_speaker_norm * args.lambda_m
 
             if args.S2 and args.add_loss == "softmax":
                 index = (labels == 0).nonzero().squeeze()
@@ -376,12 +371,6 @@ def train(args):
                 reconstruction_loss = torch.nn.MSELoss()
                 lfcc_ = lfcc.index_select(0, index)
 
-                if lfcc_.size(0) == 1:  # 当批次大小为1时特别处理
-                    # 进行适当的调整或计算
-                    continue  # 或者跳过此批次
-                # print()
-                # print(lfcc_.shape)
-                # print(lfcc_re.shape)
 
                 loss2 = reconstruction_loss(lfcc_, lfcc_re) / len(index) * len(lfcc) * args.lambda_r
 
@@ -564,7 +553,7 @@ def train(args):
 if __name__ == "__main__":
     print(torch.cuda.is_available())
     args= initParams()
-    _ = train_firststage(args)
+    # _ = train_firststage(args)
 
     _, _ = train(args)
     # model = torch.load(os.path.join(args.out_fold, 'anti-spoofing_lfcc_model.pt'))
